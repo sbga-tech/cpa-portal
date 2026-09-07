@@ -27,6 +27,7 @@ CPA Portal 注册以下路由：
 - `GET /api/admin/v1/users`：查询 Portal 用户资料
 - `GET /api/admin/v1/ranking`：查询 Portal 用户排名
 - `GET /api/admin/v1/quota`：查询账号索引和 Keeper 原始额度缓存
+- `GET /api/admin/v1/quota/reset-credits/{auth_index}`：查询单个 Codex 账号的可用重置次数和过期明细
 
 `/ranking` 和 `/ranking/*` 应转发到 CPA Portal；`/usage` 和 `/usage/*` 应转发到 CPA Usage Keeper，其余路径应转发到 CPA。
 

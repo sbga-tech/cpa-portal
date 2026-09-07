@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
     routing::get,
@@ -25,6 +25,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/v1/users", get(users))
         .route("/api/admin/v1/ranking", get(local_ranking))
         .route("/api/admin/v1/quota", get(quota_snapshot))
+        .route(
+            "/api/admin/v1/quota/reset-credits/{auth_index}",
+            get(quota_reset_credits),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +135,26 @@ async fn quota_snapshot(
         )
     })?;
     json_response(snapshot)
+}
+
+async fn quota_reset_credits(
+    _auth: AdminApiAuthenticated,
+    State(state): State<AppState>,
+    Path(auth_index): Path<String>,
+) -> Result<Response, AdminApiError> {
+    let credits = state
+        .keeper
+        .quota_reset_credits(&auth_index)
+        .await
+        .map_err(|error| {
+            map_app_error(
+                "quota_reset_credits_failed",
+                "Could not load quota reset credits.",
+                "load admin API quota reset credits",
+                error,
+            )
+        })?;
+    json_response(credits)
 }
 
 fn json_response(value: impl Serialize) -> Result<Response, AdminApiError> {
