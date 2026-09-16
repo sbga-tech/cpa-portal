@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use time::OffsetDateTime;
 
 use super::KeeperClient;
 use crate::error::AppResult;
@@ -24,6 +25,8 @@ pub struct UsageIdentity {
     pub provider: String,
     pub file_name: Option<String>,
     pub disabled: bool,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub active_until: Option<OffsetDateTime>,
 }
 
 impl KeeperClient {

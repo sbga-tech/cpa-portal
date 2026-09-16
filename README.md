@@ -127,6 +127,8 @@ Authorization: Bearer <PORTAL_ADMIN_API_TOKEN>
 
 所有 Admin API 响应均设置 `Cache-Control: no-store`。`/quota` 只读取 Keeper cache，不会触发官方额度刷新；`keeper.version`、`keeper.auto_refresh` 和 `keeper.quota_cache` 作为不透明 JSON 原样返回，由调用方按 Keeper 版本解析。
 
+`/quota` 的 `credentials[].subscription_active_until` 为订阅有效期结束时间（RFC 3339），来自 Keeper identity 的 `active_until`；上游未提供时为 `null`。它不代表 quota 窗口、登录凭证或 reset credit 的过期时间。
+
 ## 反向代理
 
 CPA Portal、CPA Usage Keeper 和 CPA 应位于同一站点下。

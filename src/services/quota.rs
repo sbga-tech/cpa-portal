@@ -22,6 +22,8 @@ pub struct QuotaCredential {
     #[serde(rename = "type")]
     pub credential_type: String,
     pub disabled: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub subscription_active_until: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,5 +85,6 @@ fn map_credential(identity: UsageIdentity) -> QuotaCredential {
         provider: identity.provider,
         credential_type: identity.identity_type,
         disabled: identity.disabled,
+        subscription_active_until: identity.active_until,
     }
 }
