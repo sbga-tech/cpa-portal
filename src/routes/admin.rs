@@ -25,6 +25,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/v1/users", get(users))
         .route("/api/admin/v1/ranking", get(local_ranking))
         .route("/api/admin/v1/quota", get(quota_snapshot))
+        .route("/api/admin/v1/quota/routing", get(quota_routing))
+        .route(
+            "/api/admin/v1/quota/history/{auth_index}",
+            get(quota_history),
+        )
         .route(
             "/api/admin/v1/quota/reset-credits/{auth_index}",
             get(quota_reset_credits),
@@ -35,6 +40,11 @@ pub fn router() -> Router<AppState> {
 struct RankingQuery {
     period: Option<String>,
     metric: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QuotaHistoryQuery {
+    window_role: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +145,42 @@ async fn quota_snapshot(
         )
     })?;
     json_response(snapshot)
+}
+
+async fn quota_routing(
+    _auth: AdminApiAuthenticated,
+    State(state): State<AppState>,
+) -> Result<Response, AdminApiError> {
+    let snapshot = quota::routing_snapshot(&state).await.map_err(|error| {
+        map_app_error(
+            "quota_routing_failed",
+            "Could not load quota routing data.",
+            "load admin API quota routing snapshot",
+            error,
+        )
+    })?;
+    json_response(snapshot)
+}
+
+async fn quota_history(
+    _auth: AdminApiAuthenticated,
+    State(state): State<AppState>,
+    Path(auth_index): Path<String>,
+    Query(query): Query<QuotaHistoryQuery>,
+) -> Result<Response, AdminApiError> {
+    let history = state
+        .keeper
+        .quota_history(&auth_index, query.window_role.as_deref())
+        .await
+        .map_err(|error| {
+            map_app_error(
+                "quota_history_failed",
+                "Could not load quota history.",
+                "load admin API quota history",
+                error,
+            )
+        })?;
+    json_response(history)
 }
 
 async fn quota_reset_credits(

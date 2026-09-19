@@ -2,7 +2,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 
-use crate::{clients::keeper::UsageIdentity, error::AppResult, state::AppState};
+use crate::{
+    clients::{cpa::AuthFileStatus, keeper::UsageIdentity},
+    error::AppResult,
+    state::AppState,
+};
 
 const AUTH_TYPE_AUTH_FILE: i32 = 1;
 
@@ -31,6 +35,21 @@ pub struct KeeperQuotaPayload {
     pub version: Value,
     pub auto_refresh: Value,
     pub quota_cache: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QuotaRoutingSnapshot {
+    #[serde(with = "time::serde::rfc3339")]
+    pub generated_at: OffsetDateTime,
+    pub credentials: Vec<AuthFileStatus>,
+}
+
+pub async fn routing_snapshot(state: &AppState) -> AppResult<QuotaRoutingSnapshot> {
+    let credentials = state.cpa.auth_file_statuses().await?;
+    Ok(QuotaRoutingSnapshot {
+        generated_at: OffsetDateTime::now_utc(),
+        credentials,
+    })
 }
 
 pub async fn snapshot(state: &AppState) -> AppResult<QuotaSnapshot> {
