@@ -15,7 +15,8 @@ pub use ranking::{
     RankingMetric, RankingPeriod,
 };
 use reqwest::{
-    Client as HttpClient, Response, StatusCode, cookie::Jar, redirect::Policy as RedirectPolicy,
+    Client as HttpClient, Method, Response, StatusCode, cookie::Jar,
+    redirect::Policy as RedirectPolicy,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
@@ -96,8 +97,9 @@ impl KeeperClient {
         decode_json_response(response, operation).await
     }
 
-    pub(super) async fn post_json<T, B>(
+    pub(super) async fn send_json<T, B>(
         &self,
+        method: Method,
         path: &str,
         body: &B,
         operation: &'static str,
@@ -109,7 +111,9 @@ impl KeeperClient {
         let (observed_generation, response) = {
             let _guard = self.inner.auth_lock.read().await;
             let observed_generation = self.inner.auth_generation.load(Ordering::Acquire);
-            let response = self.send_post(path, body, operation).await?;
+            let response = self
+                .send_body(method.clone(), path, body, operation)
+                .await?;
             (observed_generation, response)
         };
         if response.status() != StatusCode::UNAUTHORIZED {
@@ -120,13 +124,14 @@ impl KeeperClient {
         self.refresh_auth(observed_generation).await?;
         let response = {
             let _guard = self.inner.auth_lock.read().await;
-            self.send_post(path, body, operation).await?
+            self.send_body(method, path, body, operation).await?
         };
         decode_json_response(response, operation).await
     }
 
-    async fn send_post<B>(
+    async fn send_body<B>(
         &self,
+        method: Method,
         path: &str,
         body: &B,
         operation: &'static str,
@@ -136,7 +141,7 @@ impl KeeperClient {
     {
         self.inner
             .http
-            .post(self.url(path)?)
+            .request(method, self.url(path)?)
             .header(REQUEST_INTENT_HEADER, REQUEST_INTENT_FETCH)
             .json(body)
             .send()

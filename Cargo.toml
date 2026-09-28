@@ -17,7 +17,7 @@ hex = "0.4"
 oauth2 = "5"
 nutype = { version = "0.7", features = ["serde"] }
 octocrab = "0.51"
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = { version = "0.10", features = ["serde"] }

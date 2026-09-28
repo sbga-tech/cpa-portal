@@ -1,3 +1,4 @@
+use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
 use url::Url;
@@ -51,7 +52,8 @@ impl KeeperClient {
     }
 
     pub async fn quota_cache(&self, auth_indexes: &[String]) -> AppResult<Value> {
-        self.post_json(
+        self.send_json(
+            Method::POST,
             QUOTA_CACHE_PATH,
             &QuotaCacheRequest { auth_indexes },
             "quota cache request",

@@ -37,6 +37,6 @@
 ## Verification
 
 - For Rust source changes, use the checks defined in `.github/workflows/ci.yml`: nightly `cargo fmt --all -- --check` and locked Clippy with warnings denied.
-- For route, upstream-client, serialization, or configuration changes, verify the affected boundary specifically; include authentication, no-store behavior, error mapping, and sensitive-field filtering when relevant.
-- For persistence changes, verify migration behavior against an existing SQLite database rather than only a fresh database.
+- For route, upstream-client, serialization, or configuration changes, verify the affected boundary against the real CPA and Keeper images in the workspace sandbox (`../itest`, see its `README.md`); include authentication, no-store behavior, error mapping, and sensitive-field filtering when relevant. Do not write ad-hoc mock upstreams or throwaway smoke scripts; extend `itest` when it lacks a needed capability.
+- For persistence changes, verify migration behavior against an existing SQLite database rather than only a fresh database. In the sandbox, populate it with the pre-change build first (stash the change, `./itest up && ./itest login <name>`), then restore the change and `./itest up` again so Portal migrates that database on start.
 - Do not modify deployment state, publish images, or change remote data unless the user explicitly asks for that operation.

@@ -7,6 +7,7 @@ use cpa_portal::{
     config::AppConfig,
     crypto::Crypto,
     db, routes,
+    services::key_alias,
     state::AppState,
 };
 use time::Duration;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
         cpa: Arc::new(CPAClient::new(&config.cpa)?),
         keeper: Arc::new(KeeperClient::new(&config.keeper)?),
     };
+    let key_alias_task = tokio::task::spawn(key_alias::run(state.clone()));
 
     let app = routes::router(state)
         .layer(session_layer)
@@ -73,6 +75,7 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await;
     cleanup_task.abort();
+    key_alias_task.abort();
     serve_result.context("serve HTTP")?;
 
     match cleanup_task.await {
@@ -80,6 +83,11 @@ async fn main() -> Result<()> {
         Ok(Err(err)) => return Err(err).context("delete expired sessions"),
         Err(err) if err.is_cancelled() => {},
         Err(err) => return Err(err).context("join session cleanup task"),
+    }
+    match key_alias_task.await {
+        Ok(()) => {},
+        Err(err) if err.is_cancelled() => {},
+        Err(err) => return Err(err).context("join Keeper API key alias sync task"),
     }
 
     Ok(())
