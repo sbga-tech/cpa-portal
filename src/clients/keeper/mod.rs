@@ -1,4 +1,6 @@
+mod analysis;
 mod api_keys;
+mod events;
 mod identities;
 mod quota;
 mod ranking;
@@ -8,7 +10,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+pub use analysis::{UsageAnalysis, UsageCompositionItem, UsageHeatmap, UsageHeatmapCell};
 pub use api_keys::{CPAAPIKeySettingsItem, CPAAPIKeySettingsResponse};
+pub use events::{UsageEventExportItem, UsageEventsExport};
 pub use identities::{UsageIdentitiesResponse, UsageIdentity};
 pub use ranking::{
     LocalLeaderboard, LocalLeaderboardEntry, LocalLeaderboardMetrics, LocalScoreExplanation,

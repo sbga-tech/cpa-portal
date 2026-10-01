@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -16,6 +18,8 @@ pub struct QuotaSnapshot {
     pub generated_at: OffsetDateTime,
     pub credentials: Vec<QuotaCredential>,
     pub keeper: KeeperQuotaPayload,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub token_estimates: HashMap<String, f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +77,11 @@ pub async fn snapshot(state: &AppState) -> AppResult<QuotaSnapshot> {
     } else {
         state.keeper.quota_cache(&auth_indexes).await?
     };
+    let token_estimates = state
+        .token_estimates
+        .read()
+        .await
+        .fresh_values(OffsetDateTime::now_utc());
 
     Ok(QuotaSnapshot {
         generated_at: OffsetDateTime::now_utc(),
@@ -82,6 +91,7 @@ pub async fn snapshot(state: &AppState) -> AppResult<QuotaSnapshot> {
             auto_refresh,
             quota_cache,
         },
+        token_estimates,
     })
 }
 

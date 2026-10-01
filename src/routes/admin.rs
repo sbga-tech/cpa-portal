@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
 struct RankingQuery {
     period: Option<String>,
     metric: Option<String>,
+    matcher: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -119,16 +120,17 @@ async fn local_ranking(
         .map_err(|_| {
             AdminApiError::bad_request("invalid_metric", "The ranking metric is invalid.")
         })?;
-    let leaderboard = ranking::local_leaderboard(&state, period, metric)
-        .await
-        .map_err(|error| {
-            map_app_error(
-                "local_ranking_failed",
-                "Could not load the local ranking.",
-                "load admin API ranking",
-                error,
-            )
-        })?;
+    let leaderboard =
+        ranking::local_leaderboard(&state, period, metric, query.matcher.as_deref(), true)
+            .await
+            .map_err(|error| {
+                map_app_error(
+                    "local_ranking_failed",
+                    "Could not load the local ranking.",
+                    "load admin API ranking",
+                    error,
+                )
+            })?;
     json_response(leaderboard)
 }
 

@@ -44,7 +44,7 @@ async fn index(
 
     let period = parse_period(query.period.as_deref())?;
     let metric = parse_metric(query.metric.as_deref())?;
-    let leaderboard = ranking::local_leaderboard(&state, period, metric).await?;
+    let leaderboard = ranking::local_leaderboard(&state, period, metric, None, false).await?;
 
     let generated_at = leaderboard
         .generated_at
