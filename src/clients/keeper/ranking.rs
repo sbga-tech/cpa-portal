@@ -63,6 +63,10 @@ pub enum RankingMetric {
     PeakTPM,
     #[serde(rename = "peak_rpm")]
     PeakRPM,
+    /// Computed by Portal from Keeper's usage analysis; Keeper's leaderboard
+    /// does not know this metric and must never receive it.
+    #[serde(rename = "cost")]
+    Cost,
 }
 
 impl AsRef<str> for RankingMetric {
@@ -76,6 +80,7 @@ impl AsRef<str> for RankingMetric {
             Self::LatencyAverage => "latency_average",
             Self::PeakTPM => "peak_tpm",
             Self::PeakRPM => "peak_rpm",
+            Self::Cost => "cost",
         }
     }
 }
@@ -93,6 +98,7 @@ impl FromStr for RankingMetric {
             "latency_average" => Ok(Self::LatencyAverage),
             "peak_tpm" => Ok(Self::PeakTPM),
             "peak_rpm" => Ok(Self::PeakRPM),
+            "cost" => Ok(Self::Cost),
             _ => Err(()),
         }
     }

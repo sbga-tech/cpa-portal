@@ -21,8 +21,6 @@ pub struct PortalLeaderboard {
     pub stale: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub matched_models: Vec<String>,
     pub entries: Vec<PortalLeaderboardEntry>,
 }
 
@@ -64,21 +62,44 @@ pub struct PortalLeaderboardMetrics {
 #[derive(Debug, Serialize)]
 pub struct PortalRankingModel {
     pub model: String,
-    pub total_tokens: i64,
-    pub share_percent: f64,
+    /// Same unit as the entry value: tokens, or micro-USD for `cost`.
+    pub value: i64,
 }
 
 #[derive(Debug, Default)]
 struct UserModelUsage {
     total_tokens: i64,
     total_requests: i64,
+    cost_usd: f64,
     models: HashMap<String, ModelUsage>,
 }
 
 #[derive(Debug, Default)]
 struct ModelUsage {
     total_tokens: i64,
-    requests: i64,
+    cost_usd: f64,
+}
+
+impl UserModelUsage {
+    fn value(&self, metric: RankingMetric) -> i64 {
+        metric_value(metric, self.total_tokens, self.cost_usd)
+    }
+}
+
+impl ModelUsage {
+    fn value(&self, metric: RankingMetric) -> i64 {
+        metric_value(metric, self.total_tokens, self.cost_usd)
+    }
+}
+
+/// Cost is reported in micro-USD so it stays an integer like the other
+/// ranking values without rounding light users down to zero.
+fn metric_value(metric: RankingMetric, total_tokens: i64, cost_usd: f64) -> i64 {
+    if metric == RankingMetric::Cost {
+        (cost_usd * 1_000_000.0).round() as i64
+    } else {
+        total_tokens
+    }
 }
 
 pub async fn local_leaderboard(
@@ -92,22 +113,29 @@ pub async fn local_leaderboard(
     if matcher.is_some_and(|value| value.chars().count() > 64) {
         return Err(AppError::BadRequest("model matcher is too long".into()));
     }
-    if matcher.is_some() && metric != RankingMetric::TotalTokens {
+    if matcher.is_some() && !matches!(metric, RankingMetric::TotalTokens | RankingMetric::Cost) {
         return Err(AppError::BadRequest(
-            "model ranking only supports total_tokens".into(),
+            "model ranking only supports total_tokens and cost".into(),
         ));
     }
+    // Model-filtered and cost rankings are built from Keeper's usage analysis;
+    // the token leaderboard still supplies the period key and staleness.
+    let from_analysis = matcher.is_some() || metric == RankingMetric::Cost;
+    let keeper_metric = if metric == RankingMetric::Cost {
+        RankingMetric::TotalTokens
+    } else {
+        metric
+    };
 
     let (leaderboard, key_settings) = tokio::try_join!(
-        state.keeper.local_leaderboard(period, metric),
+        state.keeper.local_leaderboard(period, keeper_metric),
         state.keeper.cpa_api_key_settings(),
     )?;
-    let needs_analysis =
-        include_models && (matcher.is_some() || metric == RankingMetric::TotalTokens);
+    let needs_analysis = from_analysis || (include_models && metric == RankingMetric::TotalTokens);
     let analysis = if needs_analysis {
         match load_analysis(state, period, &leaderboard.period_key).await {
             Ok(analysis) => Some(analysis),
-            Err(_) if matcher.is_none() => None,
+            Err(_) if !from_analysis => None,
             Err(error) => return Err(error),
         }
     } else {
@@ -135,30 +163,38 @@ pub async fn local_leaderboard(
     let mut model_usage = analysis
         .as_ref()
         .map(|analysis| build_model_usage(analysis, &user_ids_by_key, matcher));
-    let matched_models = model_usage.as_ref().map(matched_models).unwrap_or_default();
 
-    if matcher.is_some() {
+    if from_analysis {
         let entries = model_usage
             .take()
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(user_id, usage)| {
                 let user = users_by_id.get(&user_id).copied()?;
-                (usage.total_tokens > 0).then(|| {
-                    let requests = usage.total_requests;
-                    (model_entry(user, usage), requests)
+                let value = usage.value(metric);
+                (value > 0).then(|| {
+                    let tiebreak = if metric == RankingMetric::Cost {
+                        usage.total_tokens
+                    } else {
+                        usage.total_requests
+                    };
+                    let models = if include_models {
+                        ranking_models(&usage, metric)
+                    } else {
+                        Vec::new()
+                    };
+                    (analysis_entry(user, value, models), tiebreak)
                 })
             })
             .collect::<Vec<_>>();
         return Ok(PortalLeaderboard {
             period: leaderboard.period,
             period_key: leaderboard.period_key,
-            metric: RankingMetric::TotalTokens,
+            metric,
             generated_at: OffsetDateTime::now_utc(),
             stale: leaderboard.stale,
             matcher: matcher.map(ToOwned::to_owned),
-            matched_models,
-            entries: rank_model_entries(entries),
+            entries: rank_analysis_entries(entries),
         });
     }
 
@@ -170,7 +206,7 @@ pub async fn local_leaderboard(
             entry.models = model_usage
                 .as_ref()
                 .and_then(|usage| usage.get(&entry.user.id))
-                .map(ranking_models)
+                .map(|usage| ranking_models(usage, metric))
                 .unwrap_or_default();
             entry
         })
@@ -188,7 +224,6 @@ pub async fn local_leaderboard(
         generated_at: leaderboard.generated_at,
         stale: leaderboard.stale,
         matcher: None,
-        matched_models: Vec::new(),
         entries,
     })
 }
@@ -248,15 +283,19 @@ fn portal_entry(
     })
 }
 
-fn model_entry(user: &User, usage: UserModelUsage) -> PortalLeaderboardEntry {
+fn analysis_entry(
+    user: &User,
+    value: i64,
+    models: Vec<PortalRankingModel>,
+) -> PortalLeaderboardEntry {
     PortalLeaderboardEntry {
         rank: 0,
         user: portal_user(user),
-        value: usage.total_tokens,
+        value,
         rate_numerator: None,
         rate_denominator: None,
         metrics: None,
-        models: ranking_models(&usage),
+        models,
     }
 }
 
@@ -270,14 +309,14 @@ fn portal_user(user: &User) -> PortalRankingUser {
     }
 }
 
-fn rank_model_entries(
+fn rank_analysis_entries(
     mut entries: Vec<(PortalLeaderboardEntry, i64)>,
 ) -> Vec<PortalLeaderboardEntry> {
-    entries.sort_by(|(left, left_requests), (right, right_requests)| {
+    entries.sort_by(|(left, left_tiebreak), (right, right_tiebreak)| {
         right
             .value
             .cmp(&left.value)
-            .then_with(|| right_requests.cmp(left_requests))
+            .then_with(|| right_tiebreak.cmp(left_tiebreak))
             .then_with(|| left.user.github_login.cmp(&right.user.github_login))
     });
     entries
@@ -310,58 +349,33 @@ fn build_model_usage(
         let usage = usage_by_user.entry(user_id).or_default();
         usage.total_tokens += cell.total_tokens;
         usage.total_requests += cell.requests;
+        usage.cost_usd += cell.cost_usd;
         let model = usage.models.entry(cell.model.clone()).or_default();
         model.total_tokens += cell.total_tokens;
-        model.requests += cell.requests;
+        model.cost_usd += cell.cost_usd;
     }
     usage_by_user
 }
 
-fn ranking_models(usage: &UserModelUsage) -> Vec<PortalRankingModel> {
-    if usage.total_tokens <= 0 {
-        return Vec::new();
-    }
-    let mut models = usage.models.iter().collect::<Vec<_>>();
-    models.sort_by(|(left_name, left), (right_name, right)| {
-        right
-            .total_tokens
-            .cmp(&left.total_tokens)
-            .then_with(|| left_name.cmp(right_name))
-    });
-    models
-        .into_iter()
-        .take(2)
+/// Every model with a positive value, largest first; consumers decide how
+/// many to show.
+fn ranking_models(usage: &UserModelUsage, metric: RankingMetric) -> Vec<PortalRankingModel> {
+    let mut models = usage
+        .models
+        .iter()
         .map(|(model, model_usage)| PortalRankingModel {
             model: model.clone(),
-            total_tokens: model_usage.total_tokens,
-            share_percent: model_usage.total_tokens as f64 * 100.0 / usage.total_tokens as f64,
+            value: model_usage.value(metric),
         })
-        .collect()
-}
-
-fn matched_models(usage_by_user: &HashMap<i64, UserModelUsage>) -> Vec<String> {
-    let mut models = HashMap::<String, (i64, i64)>::new();
-    for usage in usage_by_user.values() {
-        for (model, model_usage) in &usage.models {
-            let totals = models.entry(model.clone()).or_default();
-            totals.0 += model_usage.total_tokens;
-            totals.1 += model_usage.requests;
-        }
-    }
-    let mut models = models.into_iter().collect::<Vec<_>>();
-    models.sort_by(
-        |(left_name, (left_tokens, left_requests)),
-         (right_name, (right_tokens, right_requests))| {
-            right_tokens
-                .cmp(left_tokens)
-                .then_with(|| right_requests.cmp(left_requests))
-                .then_with(|| left_name.cmp(right_name))
-        },
-    );
+        .filter(|model| model.value > 0)
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        right
+            .value
+            .cmp(&left.value)
+            .then_with(|| left.model.cmp(&right.model))
+    });
     models
-        .into_iter()
-        .filter_map(|(name, (tokens, _))| (tokens > 0).then_some(name))
-        .collect()
 }
 
 fn analysis_query(

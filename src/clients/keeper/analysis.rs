@@ -39,6 +39,8 @@ pub struct UsageHeatmapCell {
     pub model: String,
     pub total_tokens: i64,
     pub requests: i64,
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 impl KeeperClient {

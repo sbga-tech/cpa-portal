@@ -114,6 +114,7 @@ fn metric_label(metric: RankingMetric) -> &'static str {
         RankingMetric::LatencyAverage => "Average latency",
         RankingMetric::PeakTPM => "Peak TPM",
         RankingMetric::PeakRPM => "Peak RPM",
+        RankingMetric::Cost => "Estimated cost",
     }
 }
 
@@ -143,6 +144,7 @@ fn metric_options(selected: RankingMetric) -> Vec<RankingOption> {
         RankingMetric::LatencyAverage,
         RankingMetric::PeakTPM,
         RankingMetric::PeakRPM,
+        RankingMetric::Cost,
     ]
     .into_iter()
     .map(|value| RankingOption {
@@ -213,7 +215,13 @@ fn format_metric(value: i64, metric: RankingMetric) -> String {
         },
         RankingMetric::Overall => format_integer(value),
         RankingMetric::TotalTokens | RankingMetric::RequestCount => format_integer(value),
+        RankingMetric::Cost => format_micro_usd(value),
     }
+}
+
+fn format_micro_usd(value: i64) -> String {
+    let cents = (value + 5_000) / 10_000;
+    format!("${}.{:02}", format_integer(cents / 100), cents % 100)
 }
 
 fn format_scaled_percentage(value: i64) -> String {
