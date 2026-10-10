@@ -43,6 +43,15 @@ pub async fn find_or_create_user(
         return update_existing_user(state, identity).await;
     }
 
+    if !state.config.server.allow_registration {
+        tracing::info!(
+            github_id = identity.id,
+            github_login = %identity.login,
+            "rejected sign-up while registration is closed"
+        );
+        return Err(AppError::RegistrationClosed);
+    }
+
     create_user(state, identity).await
 }
 

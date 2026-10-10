@@ -1,5 +1,8 @@
 use askama::Template;
-use axum::response::{Html, IntoResponse, Response};
+use axum::{
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
+};
 
 use crate::error::AppResult;
 
@@ -22,6 +25,15 @@ pub struct DashboardTemplate<'a> {
     pub api_base_url: &'a str,
     pub created_at: &'a str,
     pub last_login_at: &'a str,
+}
+
+#[derive(Debug, Template)]
+#[template(path = "error.html")]
+pub struct ErrorTemplate<'a> {
+    pub site_name: &'a str,
+    pub status: StatusCode,
+    pub title: &'a str,
+    pub message: &'a str,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block page_css %}
+    body { font-size: 16px; }
+    main { width: min(94vw, 520px); }
+    h1 { margin: .4rem 0 1rem; font-size: clamp(1.8rem, 6vw, 3rem); font-weight: 800; letter-spacing: -.04em; }
+    .status { color: var(--red); }
+    .actions { margin-top: 1.5rem; }
+{% endblock %}
+
+{% block content %}
+      <div><span class="prompt">$</span> open portal</div>
+      <div class="status">! {{ status }}</div>
+      <h1>{{ title }}</h1>
+      <p>{{ message }}</p>
+      <div class="actions">
+        <a class="button" href="/">Back to portal</a>
+      </div>
+{% endblock %}

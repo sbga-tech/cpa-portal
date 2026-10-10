@@ -54,6 +54,10 @@ pub struct ServerConfig {
     pub site_name: NonEmptyString,
     #[serde(default)]
     pub session: SessionConfig,
+    /// Whether GitHub users without an existing account may sign up. Existing
+    /// users can always sign in.
+    #[serde(default = "default_allow_registration")]
+    pub allow_registration: bool,
 }
 
 fn default_server_listen() -> SocketAddr {
@@ -64,6 +68,10 @@ fn default_server_listen() -> SocketAddr {
 
 fn default_site_name() -> NonEmptyString {
     NonEmptyString::new("CPA Portal")
+}
+
+fn default_allow_registration() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

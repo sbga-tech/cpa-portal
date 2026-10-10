@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{Query, State},
+    extract::{Query, State, rejection::QueryRejection},
     response::Redirect,
     routing::{get, post},
 };
@@ -53,23 +53,33 @@ enum GitHubCallbackQuery {
 async fn github_callback(
     State(state): State<AppState>,
     session: Session,
-    Query(query): Query<GitHubCallbackQuery>,
+    query: Result<Query<GitHubCallbackQuery>, QueryRejection>,
 ) -> AppResult<Redirect> {
+    let Ok(Query(query)) = query else {
+        return Err(AppError::BadRequest(
+            "The GitHub sign-in response is incomplete. Start sign-in again.".into(),
+        ));
+    };
     let (code, oauth_state) = match query {
         GitHubCallbackQuery::Success { code, state } => (code.into_inner(), state.into_inner()),
         GitHubCallbackQuery::Error {
             error,
             error_description,
         } => {
+            tracing::info!(
+                error = %error.as_ref(),
+                error_description = error_description.as_deref().unwrap_or_default(),
+                "GitHub OAuth callback returned an error"
+            );
             return Err(AppError::BadRequest(
-                error_description.unwrap_or_else(|| error.into_inner()),
+                "GitHub sign-in was cancelled or failed. Start sign-in again.".into(),
             ));
         },
     };
 
     let Some(pkce_verifier) = db::consume_oauth_state(&state.db, &oauth_state).await? else {
         return Err(AppError::BadRequest(
-            "invalid or expired OAuth state".into(),
+            "This sign-in link has expired or was already used. Start sign-in again.".into(),
         ));
     };
 

@@ -2,6 +2,8 @@
 listen = "0.0.0.0:8080"
 public_base_url = "https://ai.example.com"
 site_name = "CPA Portal"
+# Set to false to reject sign-ups from GitHub users without an account; existing users can still sign in.
+allow_registration = true
 
 [server.session]
 cookie_name = "cpa_portal"
