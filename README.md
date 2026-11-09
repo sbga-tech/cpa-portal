@@ -6,7 +6,7 @@ CPA Portal 为 CPA 提供基于 GitHub 登录的多用户自助服务：用户�
 
 - GitHub OAuth 登录与会话管理
 - CPA API Key 创建、绑定和加密存储
-- CPA Usage Keeper 同源登录与本地排名
+- 基于 CPA Usage Keeper 用量数据的用户排名
 - 面向内部 Bot 的 Bearer 认证 Admin API
 
 ## 路由
@@ -17,12 +17,12 @@ CPA Portal 为 CPA 提供基于 GitHub 登录的多用户自助服务：用户�
 - `GET /auth/github/start`：开始 GitHub OAuth
 - `GET /auth/github/callback`：OAuth 回调
 - `POST /logout`：退出登录
-- `GET /ranking`：本地用量排名
+- `GET /ranking`：用量排名
 
 内部 Admin API：
 
 - `GET /api/admin/v1/users`
-- `GET /api/admin/v1/ranking?period=<period>&metric=<metric>`
+- `GET /api/admin/v1/ranking?period=<period>&metric=<metric>&matcher=<model>`：`period` 为 `d`、`w`、`m`（今天、本周、本月），`X-N` 为往前第 N 个，`NX` 为含当前在内的最近 N 个；`metric` 为 `tokens`、`cost`、`req`、`cache`
 - `GET /api/admin/v1/quota`
 - `GET /api/admin/v1/quota/history/{auth_index}?window_role=primary|secondary`
 - `GET /api/admin/v1/quota/routing`

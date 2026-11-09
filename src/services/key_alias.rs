@@ -29,7 +29,11 @@ async fn sync_once(state: &AppState) -> AppResult<()> {
     }
 
     for key in key_settings.items {
-        let Some(login) = logins_by_api_key.remove(&key.api_key) else {
+        let Some(login) = key
+            .api_key
+            .as_deref()
+            .and_then(|api_key| logins_by_api_key.remove(api_key))
+        else {
             continue;
         };
         if key.key_alias == login {

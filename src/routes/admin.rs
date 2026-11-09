@@ -10,20 +10,19 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     admin_api::{AdminApiAuthenticated, AdminApiError},
-    clients::keeper::{RankingMetric, RankingPeriod},
     db,
     error::AppError,
-    services::{quota, ranking},
+    services::{
+        quota,
+        ranking::{self, RankingMetric, RankingPeriod},
+    },
     state::AppState,
 };
-
-const DEFAULT_PERIOD: RankingPeriod = RankingPeriod::Today;
-const DEFAULT_METRIC: RankingMetric = RankingMetric::TotalTokens;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/v1/users", get(users))
-        .route("/api/admin/v1/ranking", get(local_ranking))
+        .route("/api/admin/v1/ranking", get(ranking))
         .route("/api/admin/v1/quota", get(quota_snapshot))
         .route("/api/admin/v1/quota/routing", get(quota_routing))
         .route(
@@ -99,38 +98,37 @@ async fn users(
     })
 }
 
-async fn local_ranking(
+async fn ranking(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
     Query(query): Query<RankingQuery>,
 ) -> Result<Response, AdminApiError> {
-    let period = query
-        .period
-        .as_deref()
-        .unwrap_or(DEFAULT_PERIOD.as_ref())
-        .parse()
-        .map_err(|_| {
+    let period = match query.period.as_deref() {
+        Some(value) => value.parse().map_err(|()| {
             AdminApiError::bad_request("invalid_period", "The ranking period is invalid.")
-        })?;
-    let metric = query
-        .metric
-        .as_deref()
-        .unwrap_or(DEFAULT_METRIC.as_ref())
-        .parse()
-        .map_err(|_| {
+        })?,
+        None => RankingPeriod::TODAY,
+    };
+    let metric = match query.metric.as_deref() {
+        Some(value) => value.parse().map_err(|()| {
             AdminApiError::bad_request("invalid_metric", "The ranking metric is invalid.")
+        })?,
+        None => RankingMetric::Tokens,
+    };
+    let leaderboard = ranking::leaderboard(&state, period, metric, query.matcher.as_deref(), true)
+        .await
+        .map_err(|error| match error {
+            AppError::BadRequest(_) => AdminApiError::bad_request(
+                "invalid_ranking_query",
+                "The ranking period or model matcher is out of range.",
+            ),
+            error => map_app_error(
+                "ranking_failed",
+                "Could not load the ranking.",
+                "load admin API ranking",
+                error,
+            ),
         })?;
-    let leaderboard =
-        ranking::local_leaderboard(&state, period, metric, query.matcher.as_deref(), true)
-            .await
-            .map_err(|error| {
-                map_app_error(
-                    "local_ranking_failed",
-                    "Could not load the local ranking.",
-                    "load admin API ranking",
-                    error,
-                )
-            })?;
     json_response(leaderboard)
 }
 

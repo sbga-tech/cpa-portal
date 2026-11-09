@@ -3,21 +3,16 @@ mod api_keys;
 mod events;
 mod identities;
 mod quota;
-mod ranking;
 
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
 
-pub use analysis::{UsageAnalysis, UsageCompositionItem, UsageHeatmap, UsageHeatmapCell};
+pub use analysis::{UsageAnalysis, UsageHeatmap, UsageHeatmapCell};
 pub use api_keys::{CPAAPIKeySettingsItem, CPAAPIKeySettingsResponse};
 pub use events::{UsageEventExportItem, UsageEventsExport};
 pub use identities::{UsageIdentitiesResponse, UsageIdentity};
-pub use ranking::{
-    LocalLeaderboard, LocalLeaderboardEntry, LocalLeaderboardMetrics, LocalScoreExplanation,
-    RankingMetric, RankingPeriod,
-};
 use reqwest::{
     Client as HttpClient, Method, Response, StatusCode, cookie::Jar,
     redirect::Policy as RedirectPolicy,

@@ -15,8 +15,9 @@ pub struct CPAAPIKeySettingsResponse {
 #[derive(Debug, Deserialize)]
 pub struct CPAAPIKeySettingsItem {
     pub id: String,
-    #[serde(rename = "apiKey")]
-    pub api_key: String,
+    /// Keeper omits the raw key for plugin-provided keys.
+    #[serde(rename = "apiKey", default)]
+    pub api_key: Option<String>,
     #[serde(rename = "keyAlias", default)]
     pub key_alias: String,
 }
