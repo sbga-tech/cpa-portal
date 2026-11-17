@@ -1,6 +1,6 @@
 use reqwest::{
-    Client as HttpClient,
-    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+    Client as HttpClient, StatusCode,
+    header::{AUTHORIZATION, ETAG, HeaderMap, HeaderValue, IF_MATCH},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,12 @@ use crate::{
     error::{AppError, AppResult},
 };
 
-const MANAGEMENT_BASE_PATH: &str = "/v0/management/";
-const API_KEYS_PATH: &str = "api-keys";
-const AUTH_FILES_PATH: &str = "auth-files";
+const MANAGEMENT_BASE_PATH: &str = "/v8/management/";
+const API_KEYS_PATH: &str = "config/access/api-keys";
+const CREDENTIALS_PATH: &str = "credentials";
+/// v8 replaces the whole key list on write; a concurrent writer surfaces as
+/// 412.
+const API_KEY_WRITE_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub struct CPAClient {
@@ -44,34 +47,57 @@ impl CPAClient {
     }
 
     pub async fn provision_api_key(&self, api_key: &str) -> AppResult<()> {
-        let body = ApiKeyPatch {
-            old_key: "",
-            new_key: api_key,
-        };
+        for _ in 0..API_KEY_WRITE_ATTEMPTS {
+            let (mut keys, etag) = self.api_keys().await?;
+            if keys.iter().any(|key| key == api_key) {
+                return Ok(());
+            }
+            keys.push(api_key.to_owned());
 
-        let response = self
-            .http
-            .patch(self.url(API_KEYS_PATH))
-            .json(&body)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            return Ok(());
+            let mut request = self.http.put(self.url(API_KEYS_PATH)).json(&keys);
+            if let Some(etag) = etag {
+                request = request.header(IF_MATCH, etag);
+            }
+            let response = request.send().await?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            if status != StatusCode::PRECONDITION_FAILED {
+                let text = response.text().await.unwrap_or_default();
+                return Err(AppError::Upstream(format!(
+                    "CPA API key creation failed with {status}: {text}"
+                )));
+            }
         }
+        Err(AppError::Upstream(
+            "CPA API key creation kept conflicting with concurrent config writes".to_owned(),
+        ))
+    }
 
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        Err(AppError::Upstream(format!(
-            "CPA API key creation failed with {status}: {text}"
-        )))
+    /// Returns the client keys and the config version they were read from.
+    async fn api_keys(&self) -> AppResult<(Vec<String>, Option<HeaderValue>)> {
+        let response = self.http.get(self.url(API_KEYS_PATH)).send().await?;
+        // An absent list has no version to match; the first key is written
+        // unconditionally.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok((Vec::new(), None));
+        }
+        if !response.status().is_success() {
+            return Err(AppError::Upstream(format!(
+                "CPA API key lookup failed with {}",
+                response.status()
+            )));
+        }
+        let etag = response.headers().get(ETAG).cloned();
+        Ok((response.json().await?, etag))
     }
 
     pub async fn auth_file_statuses(&self) -> AppResult<Vec<AuthFileStatus>> {
-        let response = self.http.get(self.url(AUTH_FILES_PATH)).send().await?;
+        let response = self.http.get(self.url(CREDENTIALS_PATH)).send().await?;
         if !response.status().is_success() {
             return Err(AppError::Upstream(format!(
-                "CPA auth files lookup failed with {}",
+                "CPA credentials lookup failed with {}",
                 response.status()
             )));
         }
@@ -84,14 +110,6 @@ impl CPAClient {
             .join(path)
             .expect("management API path must be relative")
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ApiKeyPatch<'a> {
-    #[serde(rename = "old")]
-    old_key: &'a str,
-    #[serde(rename = "new")]
-    new_key: &'a str,
 }
 
 #[derive(Deserialize)]
