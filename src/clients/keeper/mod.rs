@@ -2,6 +2,7 @@ mod analysis;
 mod api_keys;
 mod events;
 mod identities;
+mod overview;
 mod quota;
 
 use std::sync::{
@@ -9,10 +10,11 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-pub use analysis::{UsageAnalysis, UsageHeatmap, UsageHeatmapCell};
+pub use analysis::{UsageAnalysis, UsageBucket, UsageHeatmap, UsageHeatmapCell};
 pub use api_keys::{CPAAPIKeySettingsItem, CPAAPIKeySettingsResponse};
 pub use events::{UsageEventExportItem, UsageEventsExport};
 pub use identities::{UsageIdentitiesResponse, UsageIdentity};
+pub use overview::{UsageOverview, UsageTotals};
 use reqwest::{
     Client as HttpClient, Method, Response, StatusCode, cookie::Jar,
     redirect::Policy as RedirectPolicy,

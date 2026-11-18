@@ -9,9 +9,15 @@
     .api-value { display: block; max-width: 100%; padding-left: .85rem; border-left: 2px solid rgba(126, 231, 135, .45); color: var(--fg); overflow-wrap: anywhere; }
     .api-url { color: var(--green); }
     .api-secret { letter-spacing: .015em; }
+    .keys { display: grid; gap: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .key-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin-bottom: 4px; }
+    .key-label { color: var(--blue); font-weight: 700; overflow-wrap: anywhere; }
+    .key-actions { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 4px; }
     .actions { padding-top: 16px; border-top: 1px solid var(--line); }
     button.usage, a.button.usage { color: var(--green); }
     button.usage:hover, a.button.usage:hover { background: transparent; color: var(--green); }
+    button.danger { color: var(--muted); }
+    button.danger:hover { color: var(--red); }
     @media (max-width: 640px) { .top { align-items: flex-start; } .grid { grid-template-columns: 1fr; gap: 4px; } .key { margin-top: 10px; } }
 {% endblock %}
 
@@ -31,13 +37,32 @@
           <div class="key">account.created_at</div><div class="value"><time datetime="{{ created_at }}">{{ created_at }}</time></div>
           <div class="key">account.last_login_at</div><div class="value"><time datetime="{{ last_login_at }}">{{ last_login_at }}</time></div>
           <div class="key">api.base_url</div><div class="value"><span class="api-value api-url">{{ api_base_url }}/v1</span></div>
-          <div class="key">api.key</div><div class="value"><span id="api-key" class="api-value api-secret">{{ api_key }}</span></div>
+        </div>
+
+        <div class="keys">
+          {% for key in keys %}
+          <div class="key-row" data-id="{{ key.id }}" data-label="{{ key.label }}" data-key="{{ key.key }}">
+            <div class="key-head">
+              <span class="key-label">{{ key.label }}</span>
+              <span class="muted">created <time datetime="{{ key.created_at }}">{{ key.created_at }}</time></span>
+            </div>
+            <span class="api-value api-secret">{{ key.key }}</span>
+            <div class="key-actions">
+              <button class="copy" type="button" data-action="copy">Copy</button>
+              <button class="usage" type="button" data-action="usage">Usage</button>
+              <button type="button" data-action="rename">Rename</button>
+              <button class="danger" type="button" data-action="rotate">Rotate</button>
+              <button class="danger" type="button" data-action="revoke">Revoke</button>
+            </div>
+          </div>
+          {% else %}
+          <p>No active API keys.</p>
+          {% endfor %}
         </div>
 
         <div class="actions">
-          <button id="copy-api-key" class="copy" type="button">Copy key</button>
+          <button class="copy" type="button" data-action="create">New key</button>
           <a class="button usage" href="/ranking">Ranking</a>
-          <button id="query-usages" class="usage" type="button">Usage</button>
           <form method="post" action="/logout"><button class="logout" type="submit">Log out</button></form>
           {% include "action_status.html" %}
         </div>
@@ -47,57 +72,99 @@
 {% block page_js %}
   <script>
     (() => {
-      const copyButton = document.getElementById("copy-api-key");
-      const usageButton = document.getElementById("query-usages");
       const logoutForm = document.querySelector('form[action="/logout"]');
-      const apiKey = document.getElementById("api-key").textContent;
       const actionStatus = window.createActionStatus(document.getElementById("action-status"));
 
-      copyButton.addEventListener("click", async () => {
-        copyButton.disabled = true;
-        actionStatus.show("loading", ">", "Copying API key...");
+      // Sends a key API request; resolves on success, otherwise throws with
+      // the API's message.
+      const keyRequest = async (method, path, body) => {
+        const response = await fetch(path, {
+          method,
+          credentials: "same-origin",
+          headers: body === undefined ? {} : { "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (response.ok) return;
+        let message = "The request failed. Try again.";
         try {
-          await navigator.clipboard.writeText(apiKey);
+          message = (await response.json()).error.message;
+        } catch (_) {}
+        throw new Error(message);
+      };
+
+      const openUsage = async (apiKey) => {
+        const response = await fetch("/usage/api/v1/auth/api-key-login", {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CPA-Usage-Keeper-Request": "fetch",
+          },
+          body: JSON.stringify({ apiKey }),
+        });
+        if (response.status === 204) {
+          window.location.assign("/usage/");
+          return;
+        }
+        if (response.status === 401) throw new Error("Usage data for this key is not ready yet.");
+        if (response.status === 429) throw new Error("Too many attempts. Try again shortly.");
+        throw new Error("Could not open usage dashboard. Try again.");
+      };
+
+      // Each action returns true when the page should reload.
+      const actions = {
+        copy: async (row) => {
+          try {
+            await navigator.clipboard.writeText(row.dataset.key);
+          } catch (_) {
+            throw new Error("Could not copy the API key.");
+          }
           actionStatus.show("success", ">", "API key copied to clipboard.", 2500);
-        } catch (_) {
-          actionStatus.show("error", "!", "Could not copy the API key.");
-        } finally {
-          copyButton.disabled = false;
-        }
-      });
+          return false;
+        },
+        usage: async (row) => {
+          actionStatus.show("loading", ">", "Opening usage dashboard...");
+          await openUsage(row.dataset.key);
+          return false;
+        },
+        create: async () => {
+          const label = window.prompt("Label for the new key:");
+          if (label === null) return false;
+          await keyRequest("POST", "/api/v1/keys", { label });
+          return true;
+        },
+        rename: async (row) => {
+          const label = window.prompt("New label:", row.dataset.label);
+          if (label === null) return false;
+          await keyRequest("PATCH", `/api/v1/keys/${row.dataset.id}`, { label });
+          return true;
+        },
+        rotate: async (row) => {
+          if (!window.confirm(`Replace "${row.dataset.label}" with a new key? Clients using the current key stop working.`)) return false;
+          await keyRequest("POST", `/api/v1/keys/${row.dataset.id}/rotate`);
+          return true;
+        },
+        revoke: async (row) => {
+          if (!window.confirm(`Revoke "${row.dataset.label}"? Clients using it stop working.`)) return false;
+          await keyRequest("DELETE", `/api/v1/keys/${row.dataset.id}`);
+          return true;
+        },
+      };
 
-      usageButton.addEventListener("click", async () => {
-        usageButton.disabled = true;
-        actionStatus.show("loading", ">", "Opening usage dashboard...");
-        try {
-          const response = await fetch("/usage/api/v1/auth/api-key-login", {
-            method: "POST",
-            credentials: "include",
-            headers: {
-              "Content-Type": "application/json",
-              "X-CPA-Usage-Keeper-Request": "fetch",
-            },
-            body: JSON.stringify({ apiKey }),
-          });
-
-          if (response.status === 204) {
-            window.location.assign("/usage/");
-            return;
+      for (const button of document.querySelectorAll("button[data-action]")) {
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            if (await actions[button.dataset.action](button.closest(".key-row"))) {
+              window.location.reload();
+            }
+          } catch (error) {
+            actionStatus.show("error", "!", error.message);
+          } finally {
+            button.disabled = false;
           }
-
-          let message = "Could not open usage dashboard. Try again.";
-          if (response.status === 401) {
-            message = "Usage data for this key is not ready yet.";
-          } else if (response.status === 429) {
-            message = "Too many attempts. Try again shortly.";
-          }
-          actionStatus.show("error", "!", message);
-        } catch (_) {
-          actionStatus.show("error", "!", "Usage service is currently unreachable.");
-        } finally {
-          usageButton.disabled = false;
-        }
-      });
+        });
+      }
 
       logoutForm.addEventListener("submit", () => {
         actionStatus.show("loading", ">", "Signing out...");

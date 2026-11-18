@@ -29,10 +29,20 @@ struct UpdateCPAAPIKeyAliasRequest<'a> {
 }
 
 impl KeeperClient {
-    pub async fn cpa_api_key_settings(&self) -> AppResult<CPAAPIKeySettingsResponse> {
+    /// With `include_deleted`, also lists keys CPA no longer has, so usage of
+    /// revoked keys can still be attributed.
+    pub async fn cpa_api_key_settings(
+        &self,
+        include_deleted: bool,
+    ) -> AppResult<CPAAPIKeySettingsResponse> {
+        let query: &[(&str, &str)] = if include_deleted {
+            &[("include_deleted", "true")]
+        } else {
+            &[]
+        };
         self.get_json(
             CPA_API_KEY_SETTINGS_PATH,
-            &[],
+            query,
             "CPA API key settings request",
         )
         .await

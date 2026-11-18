@@ -1,16 +1,19 @@
-//! Usage rankings of Portal users, built from Keeper's per-key, per-model
-//! usage analysis over calendar days in Keeper's timezone.
+//! Usage rankings and per-user usage profiles, built from Keeper's per-key,
+//! per-model usage analysis over calendar days in Keeper's timezone. Usage of
+//! revoked keys still counts toward their owner.
 
 use std::{collections::HashMap, fmt, str::FromStr};
 
 use serde::{Serialize, Serializer};
-use time::{Date, Duration, Month, OffsetDateTime};
+use time::{
+    Date, Duration, Month, OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339,
+};
 
 use crate::{
-    clients::keeper::{UsageAnalysis, UsageHeatmapCell},
-    db::{self, User},
+    clients::keeper::{UsageAnalysis, UsageBucket, UsageHeatmapCell},
+    db::{self, ApiKey, User},
     error::{AppError, AppResult},
-    services::user::decrypt_api_key,
+    services::api_keys,
     state::AppState,
 };
 
@@ -240,7 +243,10 @@ struct Usage {
     total_tokens: i64,
     requests: i64,
     input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
     cache_read_tokens: i64,
+    cache_creation_tokens: i64,
     cost_usd: f64,
 }
 
@@ -249,7 +255,10 @@ impl Usage {
         self.total_tokens += cell.total_tokens;
         self.requests += cell.requests;
         self.input_tokens += cell.input_tokens;
+        self.output_tokens += cell.output_tokens;
+        self.reasoning_tokens += cell.reasoning_tokens;
         self.cache_read_tokens += cell.cache_read_tokens;
+        self.cache_creation_tokens += cell.cache_creation_tokens;
         self.cost_usd += cell.cost_usd;
     }
 
@@ -288,63 +297,154 @@ impl Usage {
 struct UserUsage {
     total: Usage,
     models: HashMap<String, Usage>,
+    /// By Portal key id.
+    keys: HashMap<i64, Usage>,
 }
 
-pub async fn leaderboard(
-    state: &AppState,
-    period: RankingPeriod,
-    metric: RankingMetric,
-    matcher: Option<&str>,
-    include_models: bool,
-) -> AppResult<Leaderboard> {
-    let matcher = matcher.map(str::trim).filter(|value| !value.is_empty());
-    if matcher.is_some_and(|value| value.chars().count() > MAX_MATCHER_CHARS) {
-        return Err(AppError::BadRequest("model matcher is too long".into()));
+/// A Portal key as Keeper knows it.
+struct KeyOwner {
+    user_id: i64,
+    key: ApiKey,
+    secret: String,
+}
+
+/// Keeper's analysis of a period with every Keeper key traced back to the
+/// Portal key, revoked or not, it belongs to.
+struct PeriodUsage {
+    /// Keeper's current date.
+    today: Date,
+    start: Date,
+    end: Date,
+    /// Keeper's UTC offset, for day and hour boundaries.
+    offset: UtcOffset,
+    analysis: UsageAnalysis,
+    users: HashMap<i64, User>,
+    owners: HashMap<String, KeyOwner>,
+}
+
+impl PeriodUsage {
+    async fn load(state: &AppState, period: RankingPeriod) -> AppResult<Self> {
+        // Keeper's "today" fixes the calendar and its timezone.
+        let (today_analysis, key_settings) = tokio::try_join!(
+            state
+                .keeper
+                .usage_analysis(&[("range", "today"), ("include_deleted", "true")]),
+            state.keeper.cpa_api_key_settings(true),
+        )?;
+        let today_start = today_analysis
+            .range_start
+            .ok_or_else(|| AppError::Upstream("Keeper omitted today's analysis range".into()))?;
+        let today = today_start.date();
+        let (start, end) = period
+            .dates(today)
+            .filter(|(start, _)| (today - *start).whole_days() <= MAX_LOOKBACK_DAYS)
+            .ok_or_else(|| AppError::BadRequest("ranking period is out of range".into()))?;
+        let mut usage = Self {
+            today,
+            start,
+            end,
+            offset: today_start.offset(),
+            analysis: today_analysis,
+            users: HashMap::new(),
+            owners: HashMap::new(),
+        };
+        if start != today {
+            let mut query = usage.range_query();
+            query.push(("include_deleted", "true".into()));
+            usage.analysis = state.keeper.usage_analysis(&as_query(&query)).await?;
+        }
+
+        usage.users = db::list_users(&state.db)
+            .await?
+            .into_iter()
+            .map(|user| (user.id, user))
+            .collect();
+        let mut keys_by_secret = HashMap::new();
+        for key in db::list_api_keys(&state.db).await? {
+            keys_by_secret.insert(api_keys::decrypt(state, &key)?, key);
+        }
+        usage.owners = key_settings
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let secret = item.api_key?;
+                let key = keys_by_secret.remove(&secret)?;
+                Some((
+                    item.id,
+                    KeyOwner {
+                        user_id: key.user_id,
+                        key,
+                        secret,
+                    },
+                ))
+            })
+            .collect();
+        Ok(usage)
     }
 
-    // Keeper's "today" fixes the calendar; it is also the data for `d`.
-    let (today_analysis, key_settings) = tokio::try_join!(
-        state.keeper.usage_analysis(&[("range", "today")]),
-        state.keeper.cpa_api_key_settings(),
-    )?;
-    let today = today_analysis
-        .range_start
-        .ok_or_else(|| AppError::Upstream("Keeper omitted today's analysis range".into()))?
-        .date();
-    let (start, end) = period
-        .dates(today)
-        .filter(|(start, _)| (today - *start).whole_days() <= MAX_LOOKBACK_DAYS)
-        .ok_or_else(|| AppError::BadRequest("ranking period is out of range".into()))?;
-    let (start_date, end_date) = (date_string(start), date_string(end));
-    let analysis = if start == today {
-        today_analysis
-    } else {
-        state
-            .keeper
-            .usage_analysis(&[
-                ("range", "custom"),
-                ("unit", "day"),
-                ("start", &start_date),
-                ("end", &end_date),
-            ])
-            .await?
-    };
+    /// Whether the period is today or yesterday, which Keeper reports hour by
+    /// hour under its named ranges.
+    fn hourly(&self) -> bool {
+        self.start == self.end
+            && (self.start == self.today || Some(self.start) == self.today.previous_day())
+    }
 
-    let users_by_api_key = users_by_api_key(state).await?;
-    let users_by_key_id = key_settings
-        .items
-        .into_iter()
-        .filter_map(|key| {
-            let user = users_by_api_key.get(key.api_key.as_deref()?)?;
-            Some((key.id, user))
-        })
-        .collect::<HashMap<_, _>>();
+    /// Keeper range parameters for the period.
+    fn range_query(&self) -> Vec<(&'static str, String)> {
+        if self.hourly() {
+            let range = if self.start == self.today {
+                "today"
+            } else {
+                "yesterday"
+            };
+            return vec![("range", range.into())];
+        }
+        vec![
+            ("range", "custom".into()),
+            ("unit", "day".into()),
+            ("start", date_string(self.start)),
+            ("end", date_string(self.end)),
+        ]
+    }
 
-    let mut ranked = usage_by_user(&analysis, &users_by_key_id, matcher)
-        .into_values()
-        .filter_map(|(user, usage)| {
+    /// Usage per user over the models matching `matcher`.
+    fn by_user(&self, matcher: Option<&str>) -> HashMap<i64, UserUsage> {
+        let needle = matcher.map(str::to_lowercase);
+        let mut by_user = HashMap::<i64, UserUsage>::new();
+        for cell in &self.analysis.heatmap.cells {
+            if needle
+                .as_ref()
+                .is_some_and(|needle| !cell.model.to_lowercase().contains(needle))
+            {
+                continue;
+            }
+            let Some(owner) = self.owners.get(&cell.api_key) else {
+                continue;
+            };
+            let usage = by_user.entry(owner.user_id).or_default();
+            usage.total.add(cell);
+            usage
+                .models
+                .entry(cell.model.clone())
+                .or_default()
+                .add(cell);
+            usage.keys.entry(owner.key.id).or_default().add(cell);
+        }
+        by_user
+    }
+}
+
+/// Users with a positive value, best first.
+fn rank<'a>(
+    by_user: &'a HashMap<i64, UserUsage>,
+    users: &'a HashMap<i64, User>,
+    metric: RankingMetric,
+) -> Vec<(&'a User, i64, &'a UserUsage)> {
+    let mut ranked = by_user
+        .iter()
+        .filter_map(|(user_id, usage)| {
             let value = usage.total.value(metric);
-            (value > 0).then_some((user, value, usage))
+            (value > 0).then_some((users.get(user_id)?, value, usage))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(
@@ -360,15 +460,32 @@ pub async fn leaderboard(
                 .then_with(|| left_user.github_login.cmp(&right_user.github_login))
         },
     );
-    let entries = ranked
+    ranked
+}
+
+pub async fn leaderboard(
+    state: &AppState,
+    period: RankingPeriod,
+    metric: RankingMetric,
+    matcher: Option<&str>,
+    include_models: bool,
+) -> AppResult<Leaderboard> {
+    let matcher = matcher.map(str::trim).filter(|value| !value.is_empty());
+    if matcher.is_some_and(|value| value.chars().count() > MAX_MATCHER_CHARS) {
+        return Err(AppError::BadRequest("model matcher is too long".into()));
+    }
+
+    let usage = PeriodUsage::load(state, period).await?;
+    let by_user = usage.by_user(matcher);
+    let entries = rank(&by_user, &usage.users, metric)
         .into_iter()
         .enumerate()
-        .map(|(index, (user, value, usage))| LeaderboardEntry {
+        .map(|(index, (user, value, user_usage))| LeaderboardEntry {
             rank: index + 1,
             user: ranking_user(user),
             value,
             models: if include_models {
-                ranking_models(&usage, metric)
+                ranking_models(user_usage, metric)
             } else {
                 Vec::new()
             },
@@ -378,50 +495,12 @@ pub async fn leaderboard(
     Ok(Leaderboard {
         period,
         metric,
-        start_date,
-        end_date,
+        start_date: date_string(usage.start),
+        end_date: date_string(usage.end),
         generated_at: OffsetDateTime::now_utc(),
         matcher: matcher.map(ToOwned::to_owned),
         entries,
     })
-}
-
-async fn users_by_api_key(state: &AppState) -> AppResult<HashMap<String, User>> {
-    let mut users_by_api_key = HashMap::new();
-    for user in db::list_users(&state.db).await? {
-        users_by_api_key.insert(decrypt_api_key(state, &user)?, user);
-    }
-    Ok(users_by_api_key)
-}
-
-fn usage_by_user<'a>(
-    analysis: &UsageAnalysis,
-    users_by_key_id: &HashMap<String, &'a User>,
-    matcher: Option<&str>,
-) -> HashMap<i64, (&'a User, UserUsage)> {
-    let needle = matcher.map(str::to_lowercase);
-    let mut usage_by_user = HashMap::<i64, (&User, UserUsage)>::new();
-    for cell in &analysis.heatmap.cells {
-        if needle
-            .as_ref()
-            .is_some_and(|needle| !cell.model.to_lowercase().contains(needle))
-        {
-            continue;
-        }
-        let Some(&user) = users_by_key_id.get(&cell.api_key) else {
-            continue;
-        };
-        let (_, usage) = usage_by_user
-            .entry(user.id)
-            .or_insert_with(|| (user, UserUsage::default()));
-        usage.total.add(cell);
-        usage
-            .models
-            .entry(cell.model.clone())
-            .or_default()
-            .add(cell);
-    }
-    usage_by_user
 }
 
 /// Every model with a positive value, largest first; consumers decide how
@@ -443,6 +522,252 @@ fn ranking_models(usage: &UserUsage, metric: RankingMetric) -> Vec<RankingModel>
             .then_with(|| left.model.cmp(&right.model))
     });
     models
+}
+
+/// One user's usage over a period, through all keys they were ever issued.
+#[derive(Debug, Serialize)]
+pub struct UsageProfile {
+    pub period: RankingPeriod,
+    /// Inclusive `YYYY-MM-DD` dates in Keeper's timezone.
+    pub start_date: String,
+    pub end_date: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub generated_at: OffsetDateTime,
+    pub user: RankingUser,
+    /// Places in the rankings by tokens, cost and requests; absent without
+    /// usage.
+    pub ranks: ProfileRanks,
+    pub totals: ProfileTotals,
+    pub series: ProfileSeries,
+    /// Largest first by tokens.
+    pub models: Vec<ProfileModel>,
+    /// Keys used in the period, largest first by tokens.
+    pub keys: Vec<ProfileKey>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileRanks {
+    pub tokens: Option<usize>,
+    pub cost: Option<usize>,
+    pub req: Option<usize>,
+    /// Users with usage in the period.
+    pub users: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ProfileTotals {
+    pub requests: i64,
+    pub failed_requests: i64,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileSeries {
+    pub unit: SeriesUnit,
+    /// Every hour of the day or every day of the period, in order.
+    pub buckets: Vec<ProfileBucket>,
+}
+
+#[derive(Debug, Copy, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeriesUnit {
+    Hour,
+    Day,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ProfileBucket {
+    /// `YYYY-MM-DD` for days, RFC 3339 for hours.
+    pub start: String,
+    pub total_tokens: i64,
+    pub requests: i64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileModel {
+    pub model: String,
+    pub total_tokens: i64,
+    pub requests: i64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileKey {
+    pub label: String,
+    /// Last characters of the key, enough to tell keys apart.
+    pub suffix: String,
+    pub revoked: bool,
+    pub total_tokens: i64,
+    pub requests: i64,
+    pub cost_usd: f64,
+}
+
+const KEY_SUFFIX_CHARS: usize = 4;
+
+/// Returns `None` when no Portal user has this GitHub id.
+pub async fn usage_profile(
+    state: &AppState,
+    github_id: i64,
+    period: RankingPeriod,
+) -> AppResult<Option<UsageProfile>> {
+    let Some(user) = db::get_user_by_github_id(&state.db, github_id).await? else {
+        return Ok(None);
+    };
+    let usage = PeriodUsage::load(state, period).await?;
+    let by_user = usage.by_user(None);
+    let empty = UserUsage::default();
+    let user_usage = by_user.get(&user.id).unwrap_or(&empty);
+    let place = |metric| {
+        rank(&by_user, &usage.users, metric)
+            .iter()
+            .position(|(ranked, ..)| ranked.id == user.id)
+            .map(|index| index + 1)
+    };
+    let ranks = ProfileRanks {
+        tokens: place(RankingMetric::Tokens),
+        cost: place(RankingMetric::Cost),
+        req: place(RankingMetric::Requests),
+        users: rank(&by_user, &usage.users, RankingMetric::Requests).len(),
+    };
+
+    let total = &user_usage.total;
+    let mut totals = ProfileTotals {
+        requests: total.requests,
+        failed_requests: 0,
+        total_tokens: total.total_tokens,
+        input_tokens: total.input_tokens,
+        output_tokens: total.output_tokens,
+        reasoning_tokens: total.reasoning_tokens,
+        cache_read_tokens: total.cache_read_tokens,
+        cache_creation_tokens: total.cache_creation_tokens,
+        cost_usd: total.cost_usd,
+    };
+    let mut series = empty_series(&usage);
+    let range = usage.range_query();
+    // Failures and the time series need one Keeper query per used key.
+    for (keeper_id, owner) in &usage.owners {
+        if owner.user_id != user.id || !user_usage.keys.contains_key(&owner.key.id) {
+            continue;
+        }
+        let mut query = range.clone();
+        query.push(("api_key_id", keeper_id.clone()));
+        query.push(("include_deleted", "true".into()));
+        let query = as_query(&query);
+        let (overview, analysis) = tokio::try_join!(
+            state.keeper.usage_overview(&query),
+            state.keeper.usage_analysis(&query),
+        )?;
+        totals.failed_requests += overview.usage.failure_count;
+        add_to_series(&mut series, &usage, &analysis.token_usage);
+    }
+
+    let mut models = user_usage
+        .models
+        .iter()
+        .map(|(model, model_usage)| ProfileModel {
+            model: model.clone(),
+            total_tokens: model_usage.total_tokens,
+            requests: model_usage.requests,
+            cost_usd: model_usage.cost_usd,
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        right
+            .total_tokens
+            .cmp(&left.total_tokens)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    let mut keys = usage
+        .owners
+        .values()
+        .filter_map(|owner| {
+            let key_usage = user_usage.keys.get(&owner.key.id)?;
+            let suffix_start = owner.secret.len().saturating_sub(KEY_SUFFIX_CHARS);
+            Some(ProfileKey {
+                label: owner.key.label.clone(),
+                suffix: owner.secret[suffix_start..].to_owned(),
+                revoked: owner.key.revoked_at.is_some(),
+                total_tokens: key_usage.total_tokens,
+                requests: key_usage.requests,
+                cost_usd: key_usage.cost_usd,
+            })
+        })
+        .collect::<Vec<_>>();
+    keys.sort_by_key(|key| std::cmp::Reverse(key.total_tokens));
+
+    Ok(Some(UsageProfile {
+        period,
+        start_date: date_string(usage.start),
+        end_date: date_string(usage.end),
+        generated_at: OffsetDateTime::now_utc(),
+        user: ranking_user(&user),
+        ranks,
+        totals,
+        series,
+        models,
+        keys,
+    }))
+}
+
+fn empty_series(usage: &PeriodUsage) -> ProfileSeries {
+    if usage.hourly() {
+        let midnight = usage.start.midnight().assume_offset(usage.offset);
+        return ProfileSeries {
+            unit: SeriesUnit::Hour,
+            buckets: (0..24)
+                .map(|hour| ProfileBucket {
+                    start: (midnight + Duration::hours(hour))
+                        .format(&Rfc3339)
+                        .expect("RFC 3339 formats any offset date time"),
+                    ..ProfileBucket::default()
+                })
+                .collect(),
+        };
+    }
+    let days = (usage.end - usage.start).whole_days();
+    ProfileSeries {
+        unit: SeriesUnit::Day,
+        buckets: (0..=days)
+            .map(|day| ProfileBucket {
+                start: date_string(usage.start + Duration::days(day)),
+                ..ProfileBucket::default()
+            })
+            .collect(),
+    }
+}
+
+fn add_to_series(series: &mut ProfileSeries, usage: &PeriodUsage, buckets: &[UsageBucket]) {
+    for bucket in buckets {
+        let local = bucket.bucket.to_offset(usage.offset);
+        let index = match series.unit {
+            SeriesUnit::Hour if local.date() == usage.start => usize::from(local.hour()),
+            SeriesUnit::Day => match usize::try_from((local.date() - usage.start).whole_days()) {
+                Ok(index) => index,
+                Err(_) => continue,
+            },
+            SeriesUnit::Hour => continue,
+        };
+        let Some(target) = series.buckets.get_mut(index) else {
+            continue;
+        };
+        target.total_tokens += bucket.total_tokens;
+        target.requests += bucket.requests;
+        target.cost_usd += bucket.cost_usd;
+    }
+}
+
+fn as_query<'a>(query: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    query
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect()
 }
 
 fn ranking_user(user: &User) -> RankingUser {

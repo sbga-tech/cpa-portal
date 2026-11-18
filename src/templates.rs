@@ -21,10 +21,18 @@ pub struct DashboardTemplate<'a> {
     pub github_email: &'a str,
     pub github_id: i64,
     pub avatar_url: &'a str,
-    pub api_key: &'a str,
+    pub keys: &'a [DashboardKey],
     pub api_base_url: &'a str,
     pub created_at: &'a str,
     pub last_login_at: &'a str,
+}
+
+#[derive(Debug)]
+pub struct DashboardKey {
+    pub id: i64,
+    pub label: String,
+    pub key: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Template)]

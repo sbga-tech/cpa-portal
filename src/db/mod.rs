@@ -2,12 +2,12 @@ use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result};
 use sqlx::{
-    Row, SqlitePool,
+    Row, SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use time::OffsetDateTime;
 
-use crate::crypto::hash_secret;
+use crate::crypto::{EncryptedSecret, hash_secret};
 
 #[derive(Debug, Clone)]
 pub struct User {
@@ -17,8 +17,6 @@ pub struct User {
     pub github_name: String,
     pub github_email: String,
     pub avatar_url: String,
-    pub api_key_ciphertext: Vec<u8>,
-    pub api_key_nonce: Vec<u8>,
     pub created_at: i64,
     pub last_login_at: i64,
 }
@@ -30,8 +28,6 @@ pub struct NewUser {
     pub github_name: String,
     pub github_email: String,
     pub avatar_url: String,
-    pub api_key_ciphertext: Vec<u8>,
-    pub api_key_nonce: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +37,17 @@ pub struct GitHubProfileUpdate {
     pub github_name: String,
     pub github_email: String,
     pub avatar_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKey {
+    pub id: i64,
+    pub user_id: i64,
+    pub label: String,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub created_at: i64,
+    pub revoked_at: Option<i64>,
 }
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool> {
@@ -111,27 +118,35 @@ pub async fn get_user_by_github_id(
     row.map(row_to_user).transpose()
 }
 
-pub async fn insert_user(pool: &SqlitePool, user: NewUser) -> Result<User, sqlx::Error> {
+/// Creates the user together with their first API key.
+pub async fn insert_user(
+    pool: &SqlitePool,
+    user: NewUser,
+    key_label: &str,
+    key: &EncryptedSecret,
+) -> Result<User, sqlx::Error> {
     let now = now_unix();
-    let result = sqlx::query(
+    let mut tx = pool.begin().await?;
+    let user_id = sqlx::query(
         r#"INSERT INTO users (
             github_id, github_login, github_name, github_email, avatar_url,
-            api_key_ciphertext, api_key_nonce, created_at, last_login_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            created_at, last_login_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(user.github_id)
     .bind(user.github_login)
     .bind(user.github_name)
     .bind(user.github_email)
     .bind(user.avatar_url)
-    .bind(user.api_key_ciphertext)
-    .bind(user.api_key_nonce)
     .bind(now)
     .bind(now)
-    .execute(pool)
-    .await?;
+    .execute(&mut *tx)
+    .await?
+    .last_insert_rowid();
+    insert_api_key_in(&mut tx, user_id, key_label, key, now).await?;
+    tx.commit().await?;
 
-    get_user_by_id(pool, result.last_insert_rowid())
+    get_user_by_id(pool, user_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)
 }
@@ -222,9 +237,153 @@ fn row_to_user(row: sqlx::sqlite::SqliteRow) -> Result<User, sqlx::Error> {
         github_name: row.try_get("github_name")?,
         github_email: row.try_get("github_email")?,
         avatar_url: row.try_get("avatar_url")?,
-        api_key_ciphertext: row.try_get("api_key_ciphertext")?,
-        api_key_nonce: row.try_get("api_key_nonce")?,
         created_at: row.try_get("created_at")?,
         last_login_at: row.try_get("last_login_at")?,
+    })
+}
+
+/// Every key ever issued, revoked ones included, oldest first.
+pub async fn list_api_keys(pool: &SqlitePool) -> Result<Vec<ApiKey>, sqlx::Error> {
+    sqlx::query("SELECT * FROM api_keys ORDER BY id")
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(row_to_api_key)
+        .collect()
+}
+
+pub async fn list_active_api_keys(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Vec<ApiKey>, sqlx::Error> {
+    sqlx::query("SELECT * FROM api_keys WHERE user_id = ? AND revoked_at IS NULL ORDER BY id")
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(row_to_api_key)
+        .collect()
+}
+
+pub async fn insert_api_key(
+    pool: &SqlitePool,
+    user_id: i64,
+    label: &str,
+    key: &EncryptedSecret,
+) -> Result<ApiKey, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    let id = insert_api_key_in(&mut conn, user_id, label, key, now_unix()).await?;
+    get_api_key(&mut conn, id).await
+}
+
+/// Returns the renamed key, or `None` when the user has no such active key.
+pub async fn rename_api_key(
+    pool: &SqlitePool,
+    user_id: i64,
+    key_id: i64,
+    label: &str,
+) -> Result<Option<ApiKey>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    let updated = sqlx::query(
+        "UPDATE api_keys SET label = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(label)
+    .bind(key_id)
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Ok(None);
+    }
+    get_api_key(&mut conn, key_id).await.map(Some)
+}
+
+/// Returns whether the user had such an active key.
+pub async fn revoke_api_key(
+    pool: &SqlitePool,
+    user_id: i64,
+    key_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    revoke_api_key_in(&mut conn, user_id, key_id).await
+}
+
+/// Revokes the key and issues `replacement` under the same label. Returns the
+/// new key, or `None` when the user has no such active key.
+pub async fn rotate_api_key(
+    pool: &SqlitePool,
+    user_id: i64,
+    key_id: i64,
+    replacement: &EncryptedSecret,
+) -> Result<Option<ApiKey>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let old = get_api_key(&mut tx, key_id).await;
+    let old = match old {
+        Ok(old) if old.user_id == user_id && old.revoked_at.is_none() => old,
+        Ok(_) | Err(sqlx::Error::RowNotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    revoke_api_key_in(&mut tx, user_id, key_id).await?;
+    let id = insert_api_key_in(&mut tx, user_id, &old.label, replacement, now_unix()).await?;
+    let key = get_api_key(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(Some(key))
+}
+
+async fn insert_api_key_in(
+    conn: &mut SqliteConnection,
+    user_id: i64,
+    label: &str,
+    key: &EncryptedSecret,
+    now: i64,
+) -> Result<i64, sqlx::Error> {
+    Ok(sqlx::query(
+        "INSERT INTO api_keys (user_id, label, ciphertext, nonce, created_at) VALUES (?, ?, ?, ?, \
+         ?)",
+    )
+    .bind(user_id)
+    .bind(label)
+    .bind(&key.ciphertext)
+    .bind(&key.nonce)
+    .bind(now)
+    .execute(conn)
+    .await?
+    .last_insert_rowid())
+}
+
+async fn revoke_api_key_in(
+    conn: &mut SqliteConnection,
+    user_id: i64,
+    key_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(now_unix())
+    .bind(key_id)
+    .bind(user_id)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+async fn get_api_key(conn: &mut SqliteConnection, id: i64) -> Result<ApiKey, sqlx::Error> {
+    sqlx::query("SELECT * FROM api_keys WHERE id = ?")
+        .bind(id)
+        .fetch_one(conn)
+        .await
+        .and_then(row_to_api_key)
+}
+
+fn row_to_api_key(row: sqlx::sqlite::SqliteRow) -> Result<ApiKey, sqlx::Error> {
+    Ok(ApiKey {
+        id: row.try_get("id")?,
+        user_id: row.try_get("user_id")?,
+        label: row.try_get("label")?,
+        ciphertext: row.try_get("ciphertext")?,
+        nonce: row.try_get("nonce")?,
+        created_at: row.try_get("created_at")?,
+        revoked_at: row.try_get("revoked_at")?,
     })
 }

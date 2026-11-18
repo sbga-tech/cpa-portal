@@ -9,6 +9,7 @@ use crate::{
 mod admin;
 mod auth;
 mod dashboard;
+mod keys;
 mod ranking;
 
 pub fn router(state: AppState) -> Router {
@@ -16,6 +17,7 @@ pub fn router(state: AppState) -> Router {
         .merge(admin::router())
         .merge(dashboard::router())
         .merge(auth::router())
+        .merge(keys::router())
         .merge(ranking::router())
         .layer(middleware::map_response_with_state(
             state.clone(),

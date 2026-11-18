@@ -7,7 +7,7 @@ use cpa_portal::{
     config::AppConfig,
     crypto::Crypto,
     db, routes,
-    services::{key_alias, token_estimate},
+    services::{api_keys, token_estimate},
     state::AppState,
 };
 use time::Duration;
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         keeper: Arc::new(KeeperClient::new(&config.keeper)?),
         token_estimates: Arc::new(tokio::sync::RwLock::new(Default::default())),
     };
-    let key_alias_task = tokio::task::spawn(key_alias::run(state.clone()));
+    let api_key_task = tokio::task::spawn(api_keys::run(state.clone()));
     let token_estimate_task = tokio::task::spawn(token_estimate::run(state.clone()));
 
     let app = routes::router(state)
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await;
     cleanup_task.abort();
-    key_alias_task.abort();
+    api_key_task.abort();
     token_estimate_task.abort();
     serve_result.context("serve HTTP")?;
 
@@ -87,10 +87,10 @@ async fn main() -> Result<()> {
         Err(err) if err.is_cancelled() => {},
         Err(err) => return Err(err).context("join session cleanup task"),
     }
-    match key_alias_task.await {
+    match api_key_task.await {
         Ok(()) => {},
         Err(err) if err.is_cancelled() => {},
-        Err(err) => return Err(err).context("join Keeper API key alias sync task"),
+        Err(err) => return Err(err).context("join API key sync task"),
     }
     match token_estimate_task.await {
         Ok(()) => {},

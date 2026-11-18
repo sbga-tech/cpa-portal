@@ -1,4 +1,5 @@
 pub mod admin_api;
+pub mod api_error;
 pub mod clients;
 pub mod config;
 pub mod crypto;

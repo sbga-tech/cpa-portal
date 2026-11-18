@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{AUTHORIZATION, ETAG, HeaderMap, HeaderValue, IF_MATCH},
@@ -46,13 +48,38 @@ impl CPAClient {
         Ok(Self { http, base_url })
     }
 
-    pub async fn provision_api_key(&self, api_key: &str) -> AppResult<()> {
+    /// Makes the Portal keys in CPA's client key list exactly `active`: drops
+    /// keys in `issued` that are not active and appends missing active keys.
+    /// Keys Portal did not issue are kept as they are.
+    pub async fn sync_api_keys(
+        &self,
+        issued: &HashSet<String>,
+        active: &HashSet<String>,
+    ) -> AppResult<()> {
         for _ in 0..API_KEY_WRITE_ATTEMPTS {
-            let (mut keys, etag) = self.api_keys().await?;
-            if keys.iter().any(|key| key == api_key) {
+            let (current, etag) = self.api_keys().await?;
+            let mut keys = current
+                .iter()
+                .filter(|key| !issued.contains(*key) || active.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut missing = active
+                .iter()
+                .filter(|key| !current.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            missing.sort_unstable();
+            keys.extend(missing);
+            if keys == current {
                 return Ok(());
             }
-            keys.push(api_key.to_owned());
+            // CPA serves requests without authentication when the list is
+            // empty.
+            if keys.is_empty() {
+                return Err(AppError::Upstream(
+                    "refusing to clear CPA's client API key list".to_owned(),
+                ));
+            }
 
             let mut request = self.http.put(self.url(API_KEYS_PATH)).json(&keys);
             if let Some(etag) = etag {
@@ -66,12 +93,12 @@ impl CPAClient {
             if status != StatusCode::PRECONDITION_FAILED {
                 let text = response.text().await.unwrap_or_default();
                 return Err(AppError::Upstream(format!(
-                    "CPA API key creation failed with {status}: {text}"
+                    "CPA API key update failed with {status}: {text}"
                 )));
             }
         }
         Err(AppError::Upstream(
-            "CPA API key creation kept conflicting with concurrent config writes".to_owned(),
+            "CPA API key update kept conflicting with concurrent config writes".to_owned(),
         ))
     }
 

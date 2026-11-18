@@ -1,12 +1,12 @@
 # CPA Portal
 
-CPA Portal 为 CPA 提供基于 GitHub 登录的多用户自助服务：用户登录后可创建或复用自己的 CPA API Key，并查看用量排名。模型请求和路由仍由 CPA 负责，Portal 不代理模型请求。
+CPA Portal 为 CPA 提供基于 GitHub 登录的多用户自助服务：用户登录后可管理自己的多个 CPA API Key，并查看用量排名。模型请求和路由仍由 CPA 负责，Portal 不代理模型请求。
 
 ## 功能
 
 - GitHub OAuth 登录与会话管理
-- CPA API Key 创建、绑定和加密存储
-- 基于 CPA Usage Keeper 用量数据的用户排名
+- 每个用户多个 CPA API Key：创建、改名、轮换、吊销，加密存储并同步到 CPA
+- 基于 CPA Usage Keeper 用量数据的用户排名，已吊销 Key 的用量仍计入其所有者（需要支持 `include_deleted` 查询参数的 Keeper，即 [sbga-tech/cpa-usage-keeper](https://github.com/sbga-tech/cpa-usage-keeper)）
 - 面向内部 Bot 的 Bearer 认证 Admin API
 
 ## 路由
@@ -18,11 +18,13 @@ CPA Portal 为 CPA 提供基于 GitHub 登录的多用户自助服务：用户�
 - `GET /auth/github/callback`：OAuth 回调
 - `POST /logout`：退出登录
 - `GET /ranking`：用量排名
+- `/api/v1/keys`：本人 API Key 的 JSON API（`GET` 列表、`POST` 创建；`/{id}` 支持 `PATCH` 改名、`DELETE` 吊销；`POST /{id}/rotate` 轮换）
 
 内部 Admin API：
 
 - `GET /api/admin/v1/users`
 - `GET /api/admin/v1/ranking?period=<period>&metric=<metric>&matcher=<model>`：`period` 为 `d`、`w`、`m`（今天、本周、本月），`X-N` 为往前第 N 个，`NX` 为含当前在内的最近 N 个；`metric` 为 `tokens`、`cost`、`req`、`cache`
+- `GET /api/admin/v1/users/{github_id}/usage?period=<period>`：单个用户的用量概况，`period` 同上，默认 `7d`
 - `GET /api/admin/v1/quota`
 - `GET /api/admin/v1/quota/history/{auth_index}?window_role=primary|secondary`
 - `GET /api/admin/v1/quota/routing`
@@ -93,7 +95,7 @@ Portal、Keeper 和 CPA 通常位于同一站点：
 
 ```caddyfile
 ai.example.com {
-    @portal path / /auth/* /logout /ranking /ranking/*
+    @portal path / /auth/* /logout /ranking /ranking/* /api/v1/*
     handle @portal {
         reverse_proxy cpa-portal:8080
     }

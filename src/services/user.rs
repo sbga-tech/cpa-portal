@@ -2,9 +2,9 @@ use tower_sessions::Session;
 
 use crate::{
     clients::github,
-    crypto,
     db::{self, GitHubProfileUpdate, NewUser, User},
     error::{AppError, AppResult},
+    services::api_keys,
     state::AppState,
 };
 
@@ -26,13 +26,6 @@ pub async fn current_user(state: &AppState, session: &Session) -> AppResult<Opti
 pub async fn remember_current_user(session: &Session, user_id: i64) -> AppResult<()> {
     session.insert(SESSION_USER_ID, user_id).await?;
     Ok(())
-}
-
-pub fn decrypt_api_key(state: &AppState, user: &User) -> AppResult<String> {
-    state
-        .crypto
-        .decrypt(&user.api_key_ciphertext, &user.api_key_nonce)
-        .map_err(AppError::from)
 }
 
 pub async fn find_or_create_user(
@@ -75,11 +68,6 @@ async fn update_existing_user(
 }
 
 async fn create_user(state: &AppState, identity: github::GitHubIdentity) -> AppResult<User> {
-    let api_key = crypto::generate_api_key(state.config.security.api_key_prefix.as_ref())?;
-
-    state.cpa.provision_api_key(&api_key).await?;
-
-    let encrypted = state.crypto.encrypt(&api_key)?;
     let github_id = identity.id;
     let new_user = NewUser {
         github_id,
@@ -87,11 +75,13 @@ async fn create_user(state: &AppState, identity: github::GitHubIdentity) -> AppR
         github_name: identity.name,
         github_email: identity.email,
         avatar_url: identity.avatar_url,
-        api_key_ciphertext: encrypted.ciphertext,
-        api_key_nonce: encrypted.nonce,
     };
-
-    insert_user_with_race_retry(state, new_user, github_id).await
+    let user = insert_user_with_race_retry(state, new_user, github_id).await?;
+    // The key is stored; a failed sync is repaired by the periodic one.
+    if let Err(error) = api_keys::sync_cpa(state).await {
+        tracing::warn!(%error, github_id, "CPA API key sync after sign-up failed");
+    }
+    Ok(user)
 }
 
 async fn insert_user_with_race_retry(
@@ -99,7 +89,8 @@ async fn insert_user_with_race_retry(
     new_user: NewUser,
     github_id: i64,
 ) -> AppResult<User> {
-    match db::insert_user(&state.db, new_user).await {
+    let key = api_keys::generate(state)?;
+    match db::insert_user(&state.db, new_user, api_keys::DEFAULT_LABEL, &key).await {
         Ok(user) => Ok(user),
         Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
             db::get_user_by_github_id(&state.db, github_id)

@@ -5,9 +5,9 @@ use tower_sessions::Session;
 
 use crate::{
     error::{AppError, AppResult},
-    services::user::{current_user, decrypt_api_key},
+    services::{api_keys, user::current_user},
     state::AppState,
-    templates::{DashboardTemplate, LoginTemplate, render},
+    templates::{DashboardKey, DashboardTemplate, LoginTemplate, render},
 };
 
 pub fn router() -> Router<AppState> {
@@ -21,7 +21,21 @@ async fn index(State(state): State<AppState>, session: Session) -> AppResult<Res
         });
     };
 
-    let api_key = decrypt_api_key(&state, &user)?;
+    let keys = api_keys::list(&state, user.id)
+        .await?
+        .into_iter()
+        .map(|key| {
+            Ok(DashboardKey {
+                id: key.id,
+                label: key.label,
+                key: key.key,
+                created_at: key
+                    .created_at
+                    .format(&Rfc3339)
+                    .context("format key timestamp")?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
     let created_at = format_unix_timestamp(user.created_at)?;
     let api_base_url = state.config.cpa.public_base_url.as_str();
     let last_login_at = format_unix_timestamp(user.last_login_at)?;
@@ -33,7 +47,7 @@ async fn index(State(state): State<AppState>, session: Session) -> AppResult<Res
         github_email: &user.github_email,
         github_id: user.github_id,
         avatar_url: &user.avatar_url,
-        api_key: &api_key,
+        keys: &keys,
         api_base_url,
         created_at: &created_at,
         last_login_at: &last_login_at,

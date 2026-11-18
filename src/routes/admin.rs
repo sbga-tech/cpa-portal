@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderValue, header::CACHE_CONTROL},
+    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    admin_api::{AdminApiAuthenticated, AdminApiError},
+    admin_api::AdminApiAuthenticated,
+    api_error::ApiError,
     db,
     error::AppError,
     services::{
@@ -23,6 +24,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/v1/users", get(users))
         .route("/api/admin/v1/ranking", get(ranking))
+        .route("/api/admin/v1/users/{github_id}/usage", get(user_usage))
         .route("/api/admin/v1/quota", get(quota_snapshot))
         .route("/api/admin/v1/quota/routing", get(quota_routing))
         .route(
@@ -47,6 +49,11 @@ struct QuotaHistoryQuery {
     window_role: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct UsageQuery {
+    period: Option<String>,
+}
+
 #[derive(Serialize)]
 struct UsersResponse {
     generated_at: String,
@@ -67,11 +74,11 @@ struct AdminUser {
 async fn users(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let users = db::list_users(&state.db)
         .await
         .map_err(|error| {
-            AdminApiError::internal(
+            ApiError::internal(
                 "database_error",
                 "Could not list Portal users.",
                 "list admin API users",
@@ -90,7 +97,7 @@ async fn users(
                 last_login_at: unix_timestamp(user.last_login_at)?,
             })
         })
-        .collect::<Result<Vec<_>, AdminApiError>>()?;
+        .collect::<Result<Vec<_>, ApiError>>()?;
 
     json_response(UsersResponse {
         generated_at: format_time(OffsetDateTime::now_utc())?,
@@ -102,27 +109,27 @@ async fn ranking(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
     Query(query): Query<RankingQuery>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let period = match query.period.as_deref() {
         Some(value) => value.parse().map_err(|()| {
-            AdminApiError::bad_request("invalid_period", "The ranking period is invalid.")
+            ApiError::bad_request("invalid_period", "The ranking period is invalid.")
         })?,
         None => RankingPeriod::TODAY,
     };
     let metric = match query.metric.as_deref() {
         Some(value) => value.parse().map_err(|()| {
-            AdminApiError::bad_request("invalid_metric", "The ranking metric is invalid.")
+            ApiError::bad_request("invalid_metric", "The ranking metric is invalid.")
         })?,
         None => RankingMetric::Tokens,
     };
     let leaderboard = ranking::leaderboard(&state, period, metric, query.matcher.as_deref(), true)
         .await
         .map_err(|error| match error {
-            AppError::BadRequest(_) => AdminApiError::bad_request(
+            AppError::BadRequest(_) => ApiError::bad_request(
                 "invalid_ranking_query",
                 "The ranking period or model matcher is out of range.",
             ),
-            error => map_app_error(
+            error => ApiError::from_app(
                 "ranking_failed",
                 "Could not load the ranking.",
                 "load admin API ranking",
@@ -132,12 +139,50 @@ async fn ranking(
     json_response(leaderboard)
 }
 
+/// The default period of a usage profile: the last seven days.
+const DEFAULT_USAGE_PERIOD: RankingPeriod = RankingPeriod::Last {
+    unit: ranking::PeriodUnit::Day,
+    count: 7,
+};
+
+async fn user_usage(
+    _auth: AdminApiAuthenticated,
+    State(state): State<AppState>,
+    Path(github_id): Path<i64>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Response, ApiError> {
+    let period = match query.period.as_deref() {
+        Some(value) => value.parse().map_err(|()| {
+            ApiError::bad_request("invalid_period", "The usage period is invalid.")
+        })?,
+        None => DEFAULT_USAGE_PERIOD,
+    };
+    let profile = ranking::usage_profile(&state, github_id, period)
+        .await
+        .map_err(|error| {
+            ApiError::from_app(
+                "usage_failed",
+                "Could not load the usage profile.",
+                "load admin API usage profile",
+                error,
+            )
+        })?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_user",
+                "No Portal user has this GitHub id.",
+            )
+        })?;
+    json_response(profile)
+}
+
 async fn quota_snapshot(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let snapshot = quota::snapshot(&state).await.map_err(|error| {
-        map_app_error(
+        ApiError::from_app(
             "quota_failed",
             "Could not load quota data.",
             "load admin API quota snapshot",
@@ -150,9 +195,9 @@ async fn quota_snapshot(
 async fn quota_routing(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let snapshot = quota::routing_snapshot(&state).await.map_err(|error| {
-        map_app_error(
+        ApiError::from_app(
             "quota_routing_failed",
             "Could not load quota routing data.",
             "load admin API quota routing snapshot",
@@ -167,13 +212,13 @@ async fn quota_history(
     State(state): State<AppState>,
     Path(auth_index): Path<String>,
     Query(query): Query<QuotaHistoryQuery>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let history = state
         .keeper
         .quota_history(&auth_index, query.window_role.as_deref())
         .await
         .map_err(|error| {
-            map_app_error(
+            ApiError::from_app(
                 "quota_history_failed",
                 "Could not load quota history.",
                 "load admin API quota history",
@@ -187,13 +232,13 @@ async fn quota_reset_credits(
     _auth: AdminApiAuthenticated,
     State(state): State<AppState>,
     Path(auth_index): Path<String>,
-) -> Result<Response, AdminApiError> {
+) -> Result<Response, ApiError> {
     let credits = state
         .keeper
         .quota_reset_credits(&auth_index)
         .await
         .map_err(|error| {
-            map_app_error(
+            ApiError::from_app(
                 "quota_reset_credits_failed",
                 "Could not load quota reset credits.",
                 "load admin API quota reset credits",
@@ -203,7 +248,7 @@ async fn quota_reset_credits(
     json_response(credits)
 }
 
-fn json_response(value: impl Serialize) -> Result<Response, AdminApiError> {
+fn json_response(value: impl Serialize) -> Result<Response, ApiError> {
     let mut response = Json(value).into_response();
     response
         .headers_mut()
@@ -211,9 +256,9 @@ fn json_response(value: impl Serialize) -> Result<Response, AdminApiError> {
     Ok(response)
 }
 
-fn unix_timestamp(value: i64) -> Result<String, AdminApiError> {
+fn unix_timestamp(value: i64) -> Result<String, ApiError> {
     let timestamp = OffsetDateTime::from_unix_timestamp(value).map_err(|error| {
-        AdminApiError::internal(
+        ApiError::internal(
             "invalid_timestamp",
             "Portal user data contains an invalid timestamp.",
             "format admin API user timestamp",
@@ -223,28 +268,13 @@ fn unix_timestamp(value: i64) -> Result<String, AdminApiError> {
     format_time(timestamp)
 }
 
-fn format_time(value: OffsetDateTime) -> Result<String, AdminApiError> {
+fn format_time(value: OffsetDateTime) -> Result<String, ApiError> {
     value.format(&Rfc3339).map_err(|error| {
-        AdminApiError::internal(
+        ApiError::internal(
             "timestamp_format_failed",
             "Could not format a response timestamp.",
             "format admin API timestamp",
             error,
         )
     })
-}
-
-fn map_app_error(
-    code: &'static str,
-    message: &'static str,
-    operation: &'static str,
-    error: AppError,
-) -> AdminApiError {
-    match error {
-        AppError::BadRequest(_) => AdminApiError::bad_request(code, message),
-        AppError::Upstream(_) | AppError::Http(_) => {
-            AdminApiError::upstream(code, message, operation, error)
-        },
-        _ => AdminApiError::internal(code, message, operation, error),
-    }
 }

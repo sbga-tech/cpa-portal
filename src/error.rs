@@ -10,6 +10,8 @@ pub enum AppError {
     BadRequest(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("not found")]
+    NotFound,
     #[error("new account registration is disabled")]
     RegistrationClosed,
     #[error("configuration error: {0}")]
@@ -50,6 +52,11 @@ impl AppError {
                 StatusCode::UNAUTHORIZED,
                 "Sign-in required",
                 "Sign in again to continue.".to_owned(),
+            ),
+            Self::NotFound => (
+                StatusCode::NOT_FOUND,
+                "Not found",
+                "The requested item does not exist.".to_owned(),
             ),
             Self::RegistrationClosed => (
                 StatusCode::FORBIDDEN,

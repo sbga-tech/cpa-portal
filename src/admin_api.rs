@@ -1,19 +1,13 @@
 use axum::{
-    Json,
     extract::FromRequestParts,
-    http::{
-        HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL, WWW_AUTHENTICATE},
-        request::Parts,
-    },
-    response::{IntoResponse, Response},
+    http::{header::AUTHORIZATION, request::Parts},
 };
 use secrecy::ExposeSecret;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
+    api_error::ApiError,
     config::AdminApiConfig,
     error::{AppError, AppResult},
     state::AppState,
@@ -46,7 +40,7 @@ impl AdminApiAuth {
 pub struct AdminApiAuthenticated;
 
 impl FromRequestParts<AppState> for AdminApiAuthenticated {
-    type Rejection = AdminApiError;
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -58,104 +52,12 @@ impl FromRequestParts<AppState> for AdminApiAuthenticated {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .filter(|value| !value.is_empty())
-            .ok_or_else(AdminApiError::unauthorized)?;
+            .ok_or_else(ApiError::bearer_unauthorized)?;
 
         if !state.admin_api_auth.verify(candidate) {
-            return Err(AdminApiError::unauthorized());
+            return Err(ApiError::bearer_unauthorized());
         }
         Ok(Self)
-    }
-}
-
-pub struct AdminApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: &'static str,
-    authenticate: bool,
-}
-
-impl AdminApiError {
-    pub fn unauthorized() -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            message: "A valid Bearer token is required.",
-            authenticate: true,
-        }
-    }
-
-    pub fn bad_request(code: &'static str, message: &'static str) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code,
-            message,
-            authenticate: false,
-        }
-    }
-
-    pub fn internal(
-        code: &'static str,
-        message: &'static str,
-        operation: &'static str,
-        error: impl std::fmt::Display,
-    ) -> Self {
-        tracing::error!(operation, error = %error, "admin API request failed");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code,
-            message,
-            authenticate: false,
-        }
-    }
-
-    pub fn upstream(
-        code: &'static str,
-        message: &'static str,
-        operation: &'static str,
-        error: impl std::fmt::Display,
-    ) -> Self {
-        tracing::error!(operation, error = %error, "admin API upstream request failed");
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            code,
-            message,
-            authenticate: false,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct AdminApiErrorEnvelope {
-    error: AdminApiErrorBody,
-}
-
-#[derive(Serialize)]
-struct AdminApiErrorBody {
-    code: &'static str,
-    message: &'static str,
-}
-
-impl IntoResponse for AdminApiError {
-    fn into_response(self) -> Response {
-        let mut response = (
-            self.status,
-            Json(AdminApiErrorEnvelope {
-                error: AdminApiErrorBody {
-                    code: self.code,
-                    message: self.message,
-                },
-            }),
-        )
-            .into_response();
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        if self.authenticate {
-            response
-                .headers_mut()
-                .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        }
-        response
     }
 }
 
