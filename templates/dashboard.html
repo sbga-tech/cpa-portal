@@ -8,17 +8,45 @@
     .value { min-width: 0; overflow-wrap: anywhere; }
     .api-value { display: block; max-width: 100%; padding-left: .85rem; border-left: 2px solid rgba(126, 231, 135, .45); color: var(--fg); overflow-wrap: anywhere; }
     .api-url { color: var(--green); }
-    .api-secret { letter-spacing: .015em; }
-    .keys { display: grid; gap: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
-    .key-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin-bottom: 4px; }
-    .key-label { color: var(--blue); font-weight: 700; overflow-wrap: anywhere; }
-    .key-actions { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 4px; }
     .actions { padding-top: 16px; border-top: 1px solid var(--line); }
-    button.usage, a.button.usage { color: var(--green); }
-    button.usage:hover, a.button.usage:hover { background: transparent; color: var(--green); }
-    button.danger { color: var(--muted); }
-    button.danger:hover { color: var(--red); }
-    @media (max-width: 640px) { .top { align-items: flex-start; } .grid { grid-template-columns: 1fr; gap: 4px; } .key { margin-top: 10px; } }
+    a.button.usage, button.usage { color: var(--green); }
+    a.button.usage:hover, button.usage:hover { color: var(--green); }
+    /* Everything under the heading is indented by the width of its "$ " (2ch of the heading's 1rem font, in the 15px body font). */
+    .key-section { --indent: calc(2ch * 16 / 15); margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .key-section h2 { margin: 0 0 5px; font-size: 1rem; font-weight: 400; }
+    .create-key { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-bottom: 18px; padding-left: var(--indent); }
+    .create-key input, dialog input { flex: 1; min-width: 180px; border: 0; border-left: 2px solid rgba(126, 231, 135, .45); border-radius: 0; padding: 0 0 0 .85rem; background: transparent; color: var(--fg); font: inherit; line-height: 1.6; }
+    .create-key input:focus, dialog input:focus { outline: none; border-color: var(--green); }
+    .create-key button { color: var(--green); }
+    .key-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "label date" "key actions"; column-gap: 24px; row-gap: 6px; align-items: baseline; padding: 18px 0; border-top: 1px solid var(--line); }
+    .key-label { grid-area: label; margin: 0; font-size: .95rem; overflow-wrap: anywhere; }
+    /* Set in the heading's font so "> " is as wide as "$ " and the label lines up with the indent. */
+    .key-label::before { content: "> "; color: var(--muted); font-size: 1rem; font-weight: 400; white-space: pre; }
+    button.key-secret { grid-area: key; justify-self: start; padding: 0 0 0 var(--indent); color: var(--blue); font-weight: 400; text-align: left; overflow-wrap: anywhere; }
+    button.key-secret:hover { text-decoration: none; }
+    button.key-secret::after { margin-left: 1ch; color: var(--muted); font-size: .8rem; }
+    button.key-secret:hover::after, button.key-secret:focus-visible::after { content: "click to copy"; }
+    button.key-secret[data-copied]::after { content: "copied"; color: var(--green); }
+    /* The size is on the inner element so the mobile indent, in ch, matches the key above. */
+    .key-dates { grid-area: date; justify-self: end; color: var(--muted); white-space: nowrap; }
+    .key-dates small { font-size: .8rem; }
+    .key-controls { grid-area: actions; justify-self: end; display: flex; flex-wrap: wrap; gap: 8px 18px; }
+    .key-controls button { font-size: .85rem; }
+    .key-controls button[data-action="revoke"] { color: var(--red); }
+    .empty-keys { padding: 18px 0 18px var(--indent); border-top: 1px solid var(--line); }
+    dialog { width: min(90vw, 480px); padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--fg); font: inherit; }
+    dialog::backdrop { background: rgba(0, 0, 0, .75); }
+    dialog h2 { margin: 0 0 12px; font-size: 1.1rem; overflow-wrap: anywhere; }
+    dialog input { display: block; width: 100%; margin-top: 4px; }
+    dialog input[hidden] { display: none; }
+    dialog .actions { justify-content: flex-end; }
+    dialog[data-danger] #dialog-confirm { color: var(--red); }
+    #dialog-confirm { color: var(--green); }
+    @media (max-width: 640px) {
+      .top { align-items: flex-start; } .grid { grid-template-columns: 1fr; gap: 4px; } .key { margin-top: 10px; }
+      .key-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "label" "key" "date" "actions"; }
+      .key-dates, .key-controls { justify-self: start; padding-left: var(--indent); }
+    }
 {% endblock %}
 
 {% block content %}
@@ -39,44 +67,72 @@
           <div class="key">api.base_url</div><div class="value"><span class="api-value api-url">{{ api_base_url }}/v1</span></div>
         </div>
 
-        <div class="keys">
+        <section class="key-section" aria-labelledby="keys-heading">
+          <h2 id="keys-heading"><span class="prompt">$</span> keys --list</h2>
+          <form id="create-key" class="create-key">
+            <input name="label" maxlength="64" required autocomplete="off" placeholder="Key label" aria-label="Key label">
+            <button type="submit">+ Add key</button>
+          </form>
           {% for key in keys %}
-          <div class="key-row" data-id="{{ key.id }}" data-label="{{ key.label }}" data-key="{{ key.key }}">
-            <div class="key-head">
-              <span class="key-label">{{ key.label }}</span>
-              <span class="muted">created <time datetime="{{ key.created_at }}">{{ key.created_at }}</time></span>
-            </div>
-            <span class="api-value api-secret">{{ key.key }}</span>
-            <div class="key-actions">
-              <button class="copy" type="button" data-action="copy">Copy</button>
+          <article class="key-row" data-id="{{ key.id }}" data-label="{{ key.label }}" data-key="{{ key.key }}" data-masked="{{ key.masked }}">
+            <h3 class="key-label">{{ key.label }}</h3>
+            <div class="key-dates"><small>created <time datetime="{{ key.created_at }}">{{ key.created_at }}</time></small></div>
+            <button class="key-secret" type="button" data-action="copy" title="Click to copy">{{ key.masked }}</button>
+            <div class="key-controls">
+              <button type="button" data-action="reveal">Reveal</button>
               <button class="usage" type="button" data-action="usage">Usage</button>
               <button type="button" data-action="rename">Rename</button>
-              <button class="danger" type="button" data-action="rotate">Rotate</button>
-              <button class="danger" type="button" data-action="revoke">Revoke</button>
+              <button type="button" data-action="rotate">Rotate</button>
+              <button type="button" data-action="revoke">Revoke</button>
             </div>
-          </div>
+          </article>
           {% else %}
-          <p>No active API keys.</p>
+          <p class="empty-keys">No keys. Add a key to connect an application.</p>
           {% endfor %}
-        </div>
+        </section>
 
         <div class="actions">
-          <button class="copy" type="button" data-action="create">New key</button>
           <a class="button usage" href="/ranking">Ranking</a>
           <form method="post" action="/logout"><button class="logout" type="submit">Log out</button></form>
           {% include "action_status.html" %}
         </div>
+
+        <dialog id="key-dialog" aria-labelledby="dialog-title">
+          <form method="dialog">
+            <h2 id="dialog-title"></h2>
+            <p id="dialog-description"></p>
+            <input id="dialog-input" maxlength="64" autocomplete="off" aria-label="Key label">
+            <div class="actions">
+              <button type="submit" value="cancel" formnovalidate>Cancel</button>
+              <button id="dialog-confirm" type="submit" value="confirm"></button>
+            </div>
+          </form>
+        </dialog>
 
 {% endblock %}
 
 {% block page_js %}
   <script>
     (() => {
-      const logoutForm = document.querySelector('form[action="/logout"]');
       const actionStatus = window.createActionStatus(document.getElementById("action-status"));
+      const dialog = document.getElementById("key-dialog");
+      const dialogInput = document.getElementById("dialog-input");
 
-      // Sends a key API request; resolves on success, otherwise throws with
-      // the API's message.
+      // Shown after the reload that follows a change, keyed by the URL hash.
+      const doneMessages = {
+        created: "Key created. Click it to copy it to your application.",
+        rotated: "Key rotated. The old key no longer works.",
+        renamed: "Key renamed.",
+        revoked: "Key revoked. Its usage history is kept.",
+      };
+
+      const reloadWith = (kind) => {
+        history.replaceState(null, "", `#${kind}`);
+        window.location.reload();
+      };
+
+      // Sends a key API request; returns the parsed body, otherwise throws
+      // with the API's message.
       const keyRequest = async (method, path, body) => {
         const response = await fetch(path, {
           method,
@@ -84,13 +140,30 @@
           headers: body === undefined ? {} : { "Content-Type": "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
-        if (response.ok) return;
-        let message = "The request failed. Try again.";
-        try {
-          message = (await response.json()).error.message;
-        } catch (_) {}
-        throw new Error(message);
+        if (response.status === 204) return null;
+        const data = await response.json().catch(() => null);
+        if (response.ok) return data;
+        throw new Error(data?.error?.message || "The request failed. Try again.");
       };
+
+      // Resolves with the entered label (or true without an input), or null
+      // when cancelled.
+      const ask = ({ title, description, confirm, danger = false, label = null }) => new Promise((resolve) => {
+        document.getElementById("dialog-title").textContent = title;
+        document.getElementById("dialog-description").textContent = description;
+        document.getElementById("dialog-confirm").textContent = confirm;
+        dialog.toggleAttribute("data-danger", danger);
+        dialogInput.hidden = label === null;
+        dialogInput.required = label !== null;
+        dialogInput.value = label ?? "";
+        dialog.returnValue = "";
+        dialog.addEventListener("close", () => {
+          if (dialog.returnValue !== "confirm") resolve(null);
+          else resolve(label === null ? true : dialogInput.value.trim());
+        }, { once: true });
+        dialog.showModal();
+        if (label !== null) dialogInput.select();
+      });
 
       const openUsage = async (apiKey) => {
         const response = await fetch("/usage/api/v1/auth/api-key-login", {
@@ -111,53 +184,61 @@
         throw new Error("Could not open usage dashboard. Try again.");
       };
 
-      // Each action returns true when the page should reload.
       const actions = {
+        reveal: async (row, button) => {
+          const shown = button.textContent === "Reveal";
+          row.querySelector(".key-secret").textContent = shown ? row.dataset.key : row.dataset.masked;
+          button.textContent = shown ? "Hide" : "Reveal";
+        },
         copy: async (row) => {
           try {
             await navigator.clipboard.writeText(row.dataset.key);
           } catch (_) {
             throw new Error("Could not copy the API key.");
           }
-          actionStatus.show("success", ">", "API key copied to clipboard.", 2500);
-          return false;
+          const secret = row.querySelector(".key-secret");
+          secret.toggleAttribute("data-copied", true);
+          setTimeout(() => secret.removeAttribute("data-copied"), 2000);
         },
         usage: async (row) => {
           actionStatus.show("loading", ">", "Opening usage dashboard...");
           await openUsage(row.dataset.key);
-          return false;
-        },
-        create: async () => {
-          const label = window.prompt("Label for the new key:");
-          if (label === null) return false;
-          await keyRequest("POST", "/api/v1/keys", { label });
-          return true;
         },
         rename: async (row) => {
-          const label = window.prompt("New label:", row.dataset.label);
-          if (label === null) return false;
+          const label = await ask({ title: "Rename key", description: "", confirm: "Rename", label: row.dataset.label });
+          if (label === null || label === row.dataset.label) return;
           await keyRequest("PATCH", `/api/v1/keys/${row.dataset.id}`, { label });
-          return true;
+          reloadWith("renamed");
         },
         rotate: async (row) => {
-          if (!window.confirm(`Replace "${row.dataset.label}" with a new key? Clients using the current key stop working.`)) return false;
+          const confirmed = await ask({
+            title: `Rotate "${row.dataset.label}"?`,
+            description: "A new key replaces this one, and the old key stops working right away. Update every application using it.",
+            confirm: "Rotate key",
+            danger: true,
+          });
+          if (!confirmed) return;
           await keyRequest("POST", `/api/v1/keys/${row.dataset.id}/rotate`);
-          return true;
+          reloadWith("rotated");
         },
         revoke: async (row) => {
-          if (!window.confirm(`Revoke "${row.dataset.label}"? Clients using it stop working.`)) return false;
+          const confirmed = await ask({
+            title: `Revoke "${row.dataset.label}"?`,
+            description: "This key stops working permanently. Its usage history still counts toward you.",
+            confirm: "Revoke key",
+            danger: true,
+          });
+          if (!confirmed) return;
           await keyRequest("DELETE", `/api/v1/keys/${row.dataset.id}`);
-          return true;
+          reloadWith("revoked");
         },
       };
 
-      for (const button of document.querySelectorAll("button[data-action]")) {
+      for (const button of document.querySelectorAll(".key-row button[data-action]")) {
         button.addEventListener("click", async () => {
           button.disabled = true;
           try {
-            if (await actions[button.dataset.action](button.closest(".key-row"))) {
-              window.location.reload();
-            }
+            await actions[button.dataset.action](button.closest(".key-row"), button);
           } catch (error) {
             actionStatus.show("error", "!", error.message);
           } finally {
@@ -166,7 +247,27 @@
         });
       }
 
-      logoutForm.addEventListener("submit", () => {
+      const createForm = document.getElementById("create-key");
+      createForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = createForm.querySelector("button");
+        button.disabled = true;
+        try {
+          await keyRequest("POST", "/api/v1/keys", { label: createForm.label.value.trim() });
+          reloadWith("created");
+        } catch (error) {
+          actionStatus.show("error", "!", error.message);
+          button.disabled = false;
+        }
+      });
+
+      const kind = window.location.hash.slice(1);
+      if (doneMessages[kind]) {
+        history.replaceState(null, "", window.location.pathname);
+        actionStatus.show("success", ">", doneMessages[kind], 6000);
+      }
+
+      document.querySelector('form[action="/logout"]').addEventListener("submit", () => {
         actionStatus.show("loading", ">", "Signing out...");
       });
     })();

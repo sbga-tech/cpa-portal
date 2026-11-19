@@ -32,6 +32,8 @@ pub struct DashboardKey {
     pub id: i64,
     pub label: String,
     pub key: String,
+    /// The key with all but its prefix and last four characters hidden.
+    pub masked: String,
     pub created_at: String,
 }
 

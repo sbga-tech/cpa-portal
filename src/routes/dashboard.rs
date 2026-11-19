@@ -21,6 +21,7 @@ async fn index(State(state): State<AppState>, session: Session) -> AppResult<Res
         });
     };
 
+    let prefix = state.config.security.api_key_prefix.as_ref();
     let keys = api_keys::list(&state, user.id)
         .await?
         .into_iter()
@@ -28,6 +29,7 @@ async fn index(State(state): State<AppState>, session: Session) -> AppResult<Res
             Ok(DashboardKey {
                 id: key.id,
                 label: key.label,
+                masked: mask_key(&key.key, prefix),
                 key: key.key,
                 created_at: key
                     .created_at
@@ -52,6 +54,16 @@ async fn index(State(state): State<AppState>, session: Session) -> AppResult<Res
         created_at: &created_at,
         last_login_at: &last_login_at,
     })
+}
+
+fn mask_key(key: &str, prefix: &str) -> String {
+    let head = if key.starts_with(prefix) {
+        prefix.len()
+    } else {
+        0
+    };
+    let tail = key.len().saturating_sub(4).max(head);
+    format!("{}••••••••{}", &key[..head], &key[tail..])
 }
 
 fn format_unix_timestamp(timestamp: i64) -> AppResult<String> {
